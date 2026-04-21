@@ -1751,11 +1751,12 @@ HTML = """<!doctype html>
     };
   }
 
-  // Auto-unlock on first page interaction (click/keydown anywhere satisfies
-  // the browser's autoplay policy). After that, double-clap really does "boot".
+  // Auto-unlock audio on first page interaction (needed for jam mode
+  // synths). Voice recognition is NOT auto-started — mic stays cold until
+  // you click the voice pill or open the voice test panel. Keeps CPU/
+  // battery low when you're not actively voice-testing.
   function firstInteraction() {
     unlockAudio();
-    startVoice();  // prompts mic permission; user must allow.
     window.removeEventListener('pointerdown', firstInteraction);
     window.removeEventListener('keydown', firstInteraction);
   }
@@ -2060,6 +2061,11 @@ HTML = """<!doctype html>
 # --- shared state ---------------------------------------------------------
 _latest_jpeg: Optional[bytes] = None
 _jpeg_lock = threading.Lock()
+# Efficiency: count of active /stream HTTP clients. When zero, we skip
+# the cv2.imencode step entirely — no one is watching, no point spending
+# CPU on JPEG.
+_stream_clients: int = 0
+_stream_clients_lock = threading.Lock()
 _stop = threading.Event()
 
 _state_lock = threading.Lock()
@@ -3511,7 +3517,18 @@ def _capture_loop() -> None:
         print("[viewer] hand landmarker loaded", flush=True)
 
     t0 = time.time()
+    # Efficiency: cap capture loop so we don't burn CPU running MediaPipe
+    # and JPEG-encoding at 60+ fps when 15 is plenty for gesture input.
+    TARGET_FPS = 15
+    FRAME_DT = 1.0 / TARGET_FPS
+    next_frame_at = time.time()
     while not _stop.is_set():
+        # Throttle to TARGET_FPS.
+        now_throttle = time.time()
+        if now_throttle < next_frame_at:
+            time.sleep(next_frame_at - now_throttle)
+        next_frame_at = time.time() + FRAME_DT
+
         ok, frame = cam.read()
         if not ok:
             time.sleep(0.01)
@@ -3522,10 +3539,25 @@ def _capture_loop() -> None:
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts_ms = int((time.time() - t0) * 1000)
 
+        # Efficiency: only run the models whose output the current settings
+        # actually consume. Saves ~half the CPU when, e.g., click is off.
+        need_face = (
+            _click_method != "off"
+            or _right_click_method != "off"
+            or _pointing_method == "head"
+        )
+        need_hand = (
+            _pointing_method == "finger"
+            or _scroll_gesture_enabled
+            or _tab_swipe_enabled
+            or _dict_gesture != "off"
+        )
+
         face_nose = None
         face_blendshapes = None
         face_matrix = None
-        if face_landmarker is not None:
+        fres = None
+        if face_landmarker is not None and need_face:
             try:
                 fres = face_landmarker.detect_for_video(mp_img, ts_ms)
                 if fres.face_landmarks:
@@ -3544,7 +3576,7 @@ def _capture_loop() -> None:
 
         hand_wrists = []
         hands_lm_list = []
-        if hand_landmarker is not None:
+        if hand_landmarker is not None and need_hand:
             try:
                 hres = hand_landmarker.detect_for_video(mp_img, ts_ms)
                 for hand in (hres.hand_landmarks or []):
@@ -3593,7 +3625,7 @@ def _capture_loop() -> None:
                 except Exception as e:
                     print(f"[viewer] scroll failed: {e}", flush=True)
         face_lms = None
-        if face_landmarker is not None:
+        if fres is not None:
             try:
                 if fres.face_landmarks:
                     face_lms = fres.face_landmarks[0]
@@ -3652,10 +3684,15 @@ def _capture_loop() -> None:
             _left_hand_x = left_x
             _right_hand_x = right_x
 
-        okj, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if okj:
-            with _jpeg_lock:
-                _latest_jpeg = buf.tobytes()
+        # Only JPEG-encode if someone is actually watching the stream.
+        with _stream_clients_lock:
+            has_viewers = _stream_clients > 0
+        if has_viewers:
+            okj, buf = cv2.imencode(".jpg", frame,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if okj:
+                with _jpeg_lock:
+                    _latest_jpeg = buf.tobytes()
 
     cam.release()
     print("[viewer] capture loop stopped", flush=True)
@@ -4115,6 +4152,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
+            global _stream_clients
+            with _stream_clients_lock:
+                _stream_clients += 1
             try:
                 while not _stop.is_set():
                     with _jpeg_lock:
@@ -4129,9 +4169,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     )
                     self.wfile.write(jpg)
                     self.wfile.write(b"\r\n")
-                    time.sleep(1 / 30.0)
+                    time.sleep(1 / 15.0)
             except (BrokenPipeError, ConnectionResetError):
                 return
+            finally:
+                with _stream_clients_lock:
+                    _stream_clients = max(0, _stream_clients - 1)
             return
 
         if self.path == "/events":
