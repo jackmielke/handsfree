@@ -15,6 +15,7 @@ import json
 import math
 import os
 import socketserver
+import signal
 import subprocess
 import threading
 import time
@@ -106,12 +107,19 @@ HANDS_UP_Y_MAX = 0.22          # wrist Y (top=0) must be above this
 HANDS_UP_HOLD_S = 0.35
 HANDS_UP_COOLDOWN_S = 1.2
 
-# Double-clap to boot.
-CLAP_CLOSE_THRESHOLD = 0.09
-CLAP_FAR_THRESHOLD = 0.24
-CLAP_GAP_MIN_S = 0.08
-CLAP_GAP_MAX_S = 0.7
-CLAP_BOOT_COOLDOWN_S = 2.0
+# Clap detection — thresholds are tunable at runtime via "clap sensitivity"
+# preset in Control Center. Keys: close, far, gap_min, gap_max, cooldown, grace.
+CLAP_PRESETS = {
+    "tight":   (0.09, 0.18, 0.08, 0.55, 1.8, 0.10),
+    "normal":  (0.14, 0.22, 0.05, 1.00, 1.5, 0.25),
+    "loose":   (0.18, 0.28, 0.04, 1.40, 1.2, 0.40),
+    "wide":    (0.22, 0.34, 0.03, 1.80, 1.0, 0.60),
+    "ironman": (0.28, 0.42, 0.03, 2.20, 0.8, 0.90),
+}
+_clap_preset = "off"
+(CLAP_CLOSE_THRESHOLD, CLAP_FAR_THRESHOLD, CLAP_GAP_MIN_S,
+ CLAP_GAP_MAX_S, CLAP_BOOT_COOLDOWN_S,
+ CLAP_HAND_LOST_GRACE_S) = CLAP_PRESETS["normal"]
 
 # Head-pose cursor control. Jaw-open toggles tracking so it never hijacks
 # the mouse until you explicitly open your mouth.
@@ -167,6 +175,13 @@ HTML = """<!doctype html>
   .clap-flash { position: fixed; inset: 0; pointer-events:none; background: radial-gradient(circle at center, rgba(110,231,183,0.18), transparent 60%);
     opacity:0; transition: opacity 200ms ease-out; }
   .clap-flash.on { opacity: 1; }
+  body.clap-pulse { box-shadow: inset 0 0 120px rgba(110,231,183,0.35); transition: box-shadow 180ms ease-out; }
+  body.system-off { filter: grayscale(0.6) brightness(0.75); }
+  body.system-off::before { content:"paused · double clap to resume";
+    position:fixed; top:12px; left:50%; transform:translateX(-50%);
+    background:#1a1a22; color:var(--dim); padding:6px 14px; border-radius:999px;
+    font-size:11px; letter-spacing:0.12em; text-transform:uppercase;
+    border:1px solid #2a2a38; z-index:9999; pointer-events:none; }
   #heard .final   { color: var(--accent); }
   #heard .interim { color: var(--dim); font-style: italic; }
   #jam-btn, #cc-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
@@ -195,7 +210,65 @@ HTML = """<!doctype html>
   body.jam { background:radial-gradient(ellipse at top,#1a0f2a 0%,#07070b 70%); }
   #stars { position:fixed; inset:0; width:100%; height:100%;
     pointer-events:none; z-index:0; }
-  body > *:not(#stars) { position:relative; z-index:1; }
+  body > *:not(#stars):not(#disco):not(.disco-beam) { position:relative; z-index:1; }
+
+  /* Disco ball — visible only in jam mode. */
+  #disco { position:fixed; top:40px; left:50%; transform:translateX(-50%);
+    width:110px; height:110px; border-radius:50%;
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255,255,255,0.95), rgba(180,200,255,0.35) 30%, transparent 55%),
+      conic-gradient(from 0deg,
+        #ffb4e6, #b4d4ff, #b4ffd4, #fff4b4, #ffb4e6);
+    box-shadow:
+      0 0 40px rgba(255,180,230,0.55),
+      0 0 100px rgba(180,200,255,0.4),
+      inset -18px -18px 40px rgba(0,0,0,0.55),
+      inset  14px  14px 30px rgba(255,255,255,0.25);
+    opacity:0; pointer-events:none; z-index:2;
+    transition: opacity 420ms ease;
+    animation: disco-spin 6s linear infinite;
+    background-size: 10px 10px, 100% 100%;
+    filter: saturate(1.3);
+  }
+  #disco::before { /* facet grid */
+    content:""; position:absolute; inset:0; border-radius:50%;
+    background:
+      repeating-linear-gradient(45deg, rgba(0,0,0,0.25) 0 2px, transparent 2px 10px),
+      repeating-linear-gradient(-45deg, rgba(255,255,255,0.18) 0 1px, transparent 1px 10px);
+    mix-blend-mode: overlay;
+  }
+  #disco::after { /* hanging wire */
+    content:""; position:absolute; top:-42px; left:50%;
+    width:2px; height:42px; background:linear-gradient(#555, #222);
+    transform:translateX(-50%);
+  }
+  body.jam #disco { opacity:1; }
+  @keyframes disco-spin {
+    from { filter: hue-rotate(0deg) saturate(1.3); }
+    to   { filter: hue-rotate(360deg) saturate(1.3); }
+  }
+
+  /* Rotating disco beams — each a thin cone sweeping from ball to corners. */
+  .disco-beam { position:fixed; top:96px; left:50%;
+    width:2px; height:0; transform-origin:top center;
+    background:linear-gradient(to bottom,
+      hsla(var(--beam-hue, 300), 90%, 70%, 0.55), transparent);
+    pointer-events:none; z-index:0; opacity:0;
+    transition: opacity 420ms ease;
+    box-shadow: 0 0 12px hsla(var(--beam-hue, 300), 90%, 70%, 0.4);
+    animation: beam-sweep var(--beam-dur, 7s) linear infinite;
+  }
+  body.jam .disco-beam { opacity:0.85; height:120vh; }
+  @keyframes beam-sweep {
+    from { transform: translateX(-50%) rotate(var(--beam-start, 0deg)); }
+    to   { transform: translateX(-50%) rotate(calc(var(--beam-start, 0deg) + 360deg)); }
+  }
+
+  body.jam { animation: jam-floor 3s ease-in-out infinite; }
+  @keyframes jam-floor {
+    0%,100% { background:radial-gradient(ellipse at top,#1a0f2a 0%,#07070b 70%); }
+    50%     { background:radial-gradient(ellipse at top,#2a0f2a 0%,#0b0710 70%); }
+  }
   details.sec { background:#0f0f16; border:1px solid #23232f;
     border-radius:10px; padding:0; }
   details.sec > summary { list-style:none; cursor:pointer;
@@ -214,6 +287,11 @@ HTML = """<!doctype html>
 </head>
 <body>
   <canvas id="stars"></canvas>
+  <div id="disco"></div>
+  <div class="disco-beam" style="--beam-hue:320; --beam-start:0deg;   --beam-dur:7s;"></div>
+  <div class="disco-beam" style="--beam-hue:190; --beam-start:90deg;  --beam-dur:9s;"></div>
+  <div class="disco-beam" style="--beam-hue:280; --beam-start:180deg; --beam-dur:8s;"></div>
+  <div class="disco-beam" style="--beam-hue:60;  --beam-start:270deg; --beam-dur:10s;"></div>
   <div style="display:flex; gap:14px; align-items:center;">
     <h1>handsfree</h1>
     <div style="font-size:10px; color:var(--dim); letter-spacing:0.12em;">
@@ -222,17 +300,14 @@ HTML = """<!doctype html>
     <div style="flex:1"></div>
     <button id="cc-btn"  type="button">control center</button>
     <button id="jam-btn" type="button">jam mode</button>
+    <button id="master-btn" type="button" title="Master on/off. Double-clap also toggles."
+      style="font-size:11px; letter-spacing:0.18em; font-weight:800;
+             padding:8px 18px; border-radius:999px; border:1px solid;">
+      ON
+    </button>
   </div>
   <div id="cc-panel">
-    <div class="cc-row">
-      <div class="cc-label">cursor</div>
-      <div class="cc-opts">
-        <button class="cc-opt" id="cc-cursor-on">turn on</button>
-        <button class="cc-opt" id="cc-cursor-off">turn off</button>
-        <span id="cc-cursor-state" style="font-size:10px; color:var(--dim);
-              letter-spacing:0.14em; text-transform:uppercase;">off</span>
-      </div>
-    </div>
+<!-- cursor on/off is now the big master toggle in the top bar -->
     <div class="cc-row">
       <div class="cc-label">pointing</div>
       <div class="cc-opts" id="cc-point-opts">
@@ -255,13 +330,51 @@ HTML = """<!doctype html>
     <div class="cc-row">
       <div class="cc-label">wispr</div>
       <div class="cc-opts" id="cc-wispr-opts">
-        <button class="cc-opt" data-v="all">test all</button>
+        <button class="cc-opt" data-v="off">off</button>
         <button class="cc-opt" data-v="cgevent_f19">cgevent f19</button>
         <button class="cc-opt" data-v="cgevent_fn">cgevent fn</button>
         <button class="cc-opt" data-v="applescript_fn">applescript fn</button>
         <button class="cc-opt" data-v="apple_dictation">apple dictation</button>
+        <button class="cc-opt" id="cc-wispr-fire">tap now</button>
+        <button class="cc-opt" id="cc-wispr-holdtest">hold 2s test</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">dictation gesture</div>
+      <div class="cc-opts" id="cc-dict-opts">
         <button class="cc-opt" data-v="off">off</button>
-        <button class="cc-opt" id="cc-wispr-fire">fire now</button>
+        <button class="cc-opt" data-v="prayer">prayer</button>
+        <button class="cc-opt" data-v="fingertips">fingertips</button>
+        <button class="cc-opt" data-v="fist">one-hand fist</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">dictation mode</div>
+      <div class="cc-opts" id="cc-dictmode-opts">
+        <button class="cc-opt" data-v="hold">hold · release to send</button>
+        <button class="cc-opt" data-v="latch">latch · tap on / tap off</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">background</div>
+      <div class="cc-opts" id="cc-bg-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="stars">shooting stars</button>
+        <button class="cc-opt" data-v="aurora">aurora</button>
+        <button class="cc-opt" data-v="grid">retro grid</button>
+        <button class="cc-opt" data-v="particles">dust motes</button>
+        <button class="cc-opt" data-v="rain">matrix rain</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">clap toggle</div>
+      <div class="cc-opts" id="cc-clap-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="tight">A · tight</button>
+        <button class="cc-opt" data-v="normal">B · normal</button>
+        <button class="cc-opt" data-v="loose">C · loose</button>
+        <button class="cc-opt" data-v="wide">D · wide</button>
+        <button class="cc-opt" data-v="ironman">E · iron man</button>
       </div>
     </div>
     <div class="cc-row">
@@ -281,11 +394,63 @@ HTML = """<!doctype html>
       </div>
     </div>
     <div class="cc-row">
+      <div class="cc-label">sensitivity</div>
+      <div class="cc-opts" style="flex:1; min-width:0;">
+        <input type="range" id="cc-sens" min="0.3" max="2.0" step="0.05"
+               value="0.7" style="flex:1; accent-color:var(--accent);
+               min-width:140px;">
+        <span id="cc-sens-val" style="font-size:11px; color:var(--dim);
+              min-width:42px; text-align:right;">0.70×</span>
+      </div>
+    </div>
+    <div class="cc-row">
       <div class="cc-label">scroll</div>
       <div class="cc-opts" id="cc-scroll-opts">
+        <button class="cc-opt" data-v="off">off</button>
         <button class="cc-opt" data-v="gentle">gentle</button>
         <button class="cc-opt" data-v="normal">normal</button>
         <button class="cc-opt" data-v="zippy">zippy</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">swipe pages</div>
+      <div class="cc-opts" id="cc-swipe-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="on">on</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">voice commands</div>
+      <div class="cc-opts" id="cc-voice-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="on">on</button>
+      </div>
+    </div>
+    <div class="cc-row" id="cc-voice-panel" style="display:none;">
+      <div class="cc-label">mappings</div>
+      <div class="cc-opts" style="flex:1; min-width:0; flex-direction:column;
+           align-items:stretch; gap:4px;">
+        <textarea id="cc-voice-map" spellcheck="false"
+          style="width:100%; min-height:80px; background:#0f1420;
+          color:var(--fg); border:1px solid #2a3550; border-radius:6px;
+          font:11px/1.5 ui-monospace,Menlo,monospace; padding:6px 8px;
+          resize:vertical;"
+          placeholder="telegram: cmd+t&#10;arc: cmd+a"></textarea>
+        <div style="font-size:10px; color:var(--dim); line-height:1.4;">
+          format: <code>phrase: cmd+key</code> per line. heard text is matched
+          as substring (case-insensitive). mods: cmd/shift/opt/ctrl.
+          <span id="cc-voice-heard" style="color:var(--accent);
+            margin-left:6px;"></span>
+        </div>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">master</div>
+      <div class="cc-opts">
+        <span id="cc-master-state" style="font-size:10px; color:var(--dim);
+              letter-spacing:0.14em; text-transform:uppercase;">on</span>
+        <span id="cc-clap-indicator" style="font-size:10px; color:var(--dim);
+              letter-spacing:0.14em;">claps: 0 — double clap to toggle</span>
       </div>
     </div>
     <div class="cc-hint">
@@ -607,18 +772,25 @@ HTML = """<!doctype html>
       body: JSON.stringify(Object.assign({ action: 'cursor_method' }, payload)),
     }).catch(() => {});
   }
-  const ccCursorOn   = document.getElementById('cc-cursor-on');
-  const ccCursorOff  = document.getElementById('cc-cursor-off');
-  const ccCursorState= document.getElementById('cc-cursor-state');
-  function postCursor(on) {
+  const masterBtn = document.getElementById('master-btn');
+  let masterOn = true;
+  function paintMaster(on) {
+    masterOn = !!on;
+    masterBtn.textContent = on ? 'ON' : 'OFF';
+    masterBtn.style.background = on ? 'var(--cool)' : '#2a1418';
+    masterBtn.style.color = on ? '#05170f' : '#f5a3a3';
+    masterBtn.style.borderColor = on ? 'var(--cool)' : '#6b2a35';
+  }
+  paintMaster(true);
+  masterBtn.addEventListener('click', () => {
+    const want = !masterOn;
+    paintMaster(want);
     fetch('/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'cursor_enable', on }),
+      body: JSON.stringify({ action: 'master', on: want }),
     }).catch(() => {});
-  }
-  ccCursorOn.addEventListener('click',  () => postCursor(true));
-  ccCursorOff.addEventListener('click', () => postCursor(false));
+  });
 
   ccPoint.addEventListener('click', (e) => {
     const b = e.target.closest('.cc-opt'); if (!b) return;
@@ -646,14 +818,55 @@ HTML = """<!doctype html>
       body: JSON.stringify({ action: 'wispr_test' }),
     }).catch(() => {});
   }
+  function holdTestWispr() {
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'wispr_hold_test' }),
+    }).catch(() => {});
+  }
   ccWispr.addEventListener('click', (e) => {
     const b = e.target.closest('.cc-opt'); if (!b) return;
     if (b.id === 'cc-wispr-fire') { fireWispr(); return; }
+    if (b.id === 'cc-wispr-holdtest') { holdTestWispr(); return; }
     ccWispr.querySelectorAll('.cc-opt').forEach(x => {
-      if (x.id !== 'cc-wispr-fire')
+      if (!x.id)
         x.classList.toggle('on', x.dataset.v === b.dataset.v);
     });
     postWispr(b.dataset.v);
+  });
+
+  const ccDict = document.getElementById('cc-dict-opts');
+  ccDict.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccDict, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'dict_gesture', gesture: b.dataset.v }),
+    }).catch(() => {});
+  });
+
+  const ccDictMode = document.getElementById('cc-dictmode-opts');
+  ccDictMode.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccDictMode, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'dict_mode', mode: b.dataset.v }),
+    }).catch(() => {});
+  });
+
+  const ccClap = document.getElementById('cc-clap-opts');
+  ccClap.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccClap, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clap_preset', preset: b.dataset.v }),
+    }).catch(() => {});
   });
 
   const ccRClick = document.getElementById('cc-rclick-opts');
@@ -692,6 +905,34 @@ HTML = """<!doctype html>
     postScroll(b.dataset.v);
   });
 
+  const ccSwipe = document.getElementById('cc-swipe-opts');
+  ccSwipe.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccSwipe, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'swipe_gesture', on: b.dataset.v === 'on' }),
+    }).catch(() => {});
+  });
+
+  const ccSens = document.getElementById('cc-sens');
+  const ccSensVal = document.getElementById('cc-sens-val');
+  function paintSens(v) {
+    const n = Number(v);
+    if (document.activeElement !== ccSens) ccSens.value = n;
+    ccSensVal.textContent = n.toFixed(2) + '×';
+  }
+  ccSens.addEventListener('input', () => {
+    paintSens(ccSens.value);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'cursor_sens', value: parseFloat(ccSens.value) }),
+    }).catch(() => {});
+  });
+
+  let clapCount = 0, clapDecayT = null;
   let ctx = null, drums = null, pad = null;
   let leftTh = null, rightTh = null;
   let jamBass = null, jamLead = null;
@@ -1166,7 +1407,38 @@ HTML = """<!doctype html>
             x.classList.toggle('on', x.dataset.v === msg.wispr);
         });
       }
-      if ('scrollSens' in msg) paintActive(ccScroll, msg.scrollSens);
+      if ('scrollGesture' in msg) {
+        const sv = msg.scrollGesture ? (msg.scrollSens || 'normal') : 'off';
+        paintActive(ccScroll, sv);
+      } else if ('scrollSens' in msg) {
+        paintActive(ccScroll, msg.scrollSens);
+      }
+      if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
+      if ('cursorSens' in msg) paintSens(msg.cursorSens);
+      if ('systemEnabled' in msg) {
+        document.body.classList.toggle('system-off', !msg.systemEnabled);
+        paintMaster(msg.systemEnabled);
+        const ms = document.getElementById('cc-master-state');
+        if (ms) {
+          ms.textContent = msg.systemEnabled ? 'on' : 'off';
+          ms.style.color = msg.systemEnabled
+            ? 'var(--cool)' : 'var(--warm)';
+        }
+      }
+      if (msg.clapTick) {
+        clapCount += 1;
+        const ci = document.getElementById('cc-clap-indicator');
+        if (ci) {
+          ci.textContent = 'clap! (' + clapCount + ') double clap to toggle';
+          ci.style.color = 'var(--cool)';
+          clearTimeout(clapDecayT);
+          clapDecayT = setTimeout(() => {
+            ci.style.color = 'var(--dim)';
+          }, 800);
+        }
+        document.body.classList.add('clap-pulse');
+        setTimeout(() => document.body.classList.remove('clap-pulse'), 180);
+      }
       if ('rightClick' in msg) paintActive(ccRClick, msg.rightClick);
       if ('doubleClick' in msg) paintActive(ccDClick, msg.doubleClick ? 'on' : 'off');
       if (msg.dictation) {
@@ -1179,11 +1451,6 @@ HTML = """<!doctype html>
         }
       }
       if ('cursor' in msg) {
-        const state = !msg.cursor ? 'off'
-          : (msg.cursorCalibrated ? 'live' : 'calibrating…');
-        if (ccCursorState) ccCursorState.textContent = state;
-        if (ccCursorOn)  ccCursorOn.classList.toggle('on', !!msg.cursor);
-        if (ccCursorOff) ccCursorOff.classList.toggle('on', !msg.cursor);
         if (msg.cursor) {
           cursorPill.style.display = 'inline-block';
           const suffix = msg.pointing && msg.click
@@ -1194,6 +1461,9 @@ HTML = """<!doctype html>
           cursorPill.style.display = 'none';
         }
       }
+      if ('clapPreset' in msg) paintActive(ccClap, msg.clapPreset);
+      if ('dictGesture' in msg) paintActive(ccDict, msg.dictGesture);
+      if ('dictMode' in msg) paintActive(ccDictMode, msg.dictMode);
     };
   }
 
@@ -1210,8 +1480,9 @@ HTML = """<!doctype html>
 
   connectEvents();
 
-  // Shooting stars — dim by default, brighter when jam mode is on.
-  (function stars() {
+  // Animated background — switchable between several modes via Control Center.
+  let __bgMode = localStorage.getItem('bgMode') || 'stars';
+  (function bg() {
     const canvas = document.getElementById('stars');
     const ctx = canvas.getContext('2d');
     let w = 0, h = 0, dpr = window.devicePixelRatio || 1;
@@ -1225,8 +1496,10 @@ HTML = """<!doctype html>
     }
     window.addEventListener('resize', resize);
     resize();
+
+    // --- stars ---
     const shooters = [];
-    function spawn() {
+    function spawnShooter() {
       const fromLeft = Math.random() < 0.5;
       shooters.push({
         x: fromLeft ? -40 : w + 40,
@@ -1237,10 +1510,7 @@ HTML = """<!doctype html>
         hue: 180 + Math.random() * 120,
       });
     }
-    function tick() {
-      ctx.clearRect(0, 0, w, h);
-      // ambient tiny twinkle dots
-      const jam = document.body.classList.contains('jam');
+    function drawStars(jam) {
       const baseAlpha = jam ? 0.5 : 0.28;
       for (let i = 0; i < 60; i++) {
         const sx = (i * 97 + (performance.now() * 0.02)) % w;
@@ -1249,34 +1519,253 @@ HTML = """<!doctype html>
         ctx.fillStyle = `rgba(200,220,255,${baseAlpha * tw * 0.35})`;
         ctx.fillRect(sx, sy, 1.2, 1.2);
       }
-      if (Math.random() < (jam ? 0.035 : 0.012)) spawn();
+      if (Math.random() < (jam ? 0.035 : 0.012)) spawnShooter();
       for (let i = shooters.length - 1; i >= 0; i--) {
         const s = shooters[i];
-        // trail
         const grad = ctx.createLinearGradient(
           s.x, s.y, s.x - s.vx * 12, s.y - s.vy * 12);
         grad.addColorStop(0, `hsla(${s.hue}, 90%, 75%, ${0.9*s.life})`);
         grad.addColorStop(1, `hsla(${s.hue}, 90%, 70%, 0)`);
-        ctx.strokeStyle = grad;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y);
-        ctx.lineTo(s.x - s.vx * 12, s.y - s.vy * 12);
-        ctx.stroke();
-        // head
+        ctx.strokeStyle = grad; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(s.x, s.y);
+        ctx.lineTo(s.x - s.vx * 12, s.y - s.vy * 12); ctx.stroke();
         ctx.fillStyle = `hsla(${s.hue}, 100%, 92%, ${s.life})`;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, 1.8, 0, Math.PI * 2);
-        ctx.fill();
-        s.x += s.vx; s.y += s.vy;
-        s.life -= 0.01;
+        ctx.beginPath(); ctx.arc(s.x, s.y, 1.8, 0, Math.PI * 2); ctx.fill();
+        s.x += s.vx; s.y += s.vy; s.life -= 0.01;
         if (s.life <= 0 || s.x < -80 || s.x > w + 80 || s.y > h + 80) {
           shooters.splice(i, 1);
         }
       }
+    }
+
+    // --- aurora: flowing ribbons of color ---
+    function drawAurora(jam) {
+      const t = performance.now() * 0.0004;
+      const amp = jam ? 0.75 : 0.55;
+      for (let band = 0; band < 3; band++) {
+        const hue = (200 + band * 50 + t * 60) % 360;
+        ctx.globalAlpha = amp * (0.22 + 0.10 * band);
+        ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
+        ctx.beginPath();
+        ctx.moveTo(0, h);
+        for (let x = 0; x <= w; x += 12) {
+          const y = h * 0.4
+            + Math.sin(x * 0.006 + t * 3 + band) * 90
+            + Math.sin(x * 0.002 + t * 2 + band * 1.7) * 140;
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // --- retro grid: vanishing-point perspective lines ---
+    function drawGrid(jam) {
+      const t = performance.now() * 0.001;
+      const horizon = h * 0.55;
+      ctx.strokeStyle = jam ? 'rgba(255,80,200,0.55)' : 'rgba(120,180,255,0.32)';
+      ctx.lineWidth = 1;
+      // horizontal lines receding toward horizon
+      for (let i = 0; i < 18; i++) {
+        const p = ((i + t * 0.6) % 18) / 18;
+        const y = horizon + Math.pow(p, 2.5) * (h - horizon);
+        ctx.globalAlpha = Math.min(1, p * 2);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+      ctx.globalAlpha = 0.6;
+      // vertical lines converging to center
+      for (let x = -10; x <= 10; x++) {
+        ctx.beginPath();
+        ctx.moveTo(w / 2 + x * (w / 18), h);
+        ctx.lineTo(w / 2 + x * 4, horizon);
+        ctx.stroke();
+      }
+      // sun
+      const sunR = 120;
+      const sunGrad = ctx.createLinearGradient(0, horizon - sunR, 0, horizon);
+      sunGrad.addColorStop(0, 'rgba(255,180,80,0.9)');
+      sunGrad.addColorStop(1, 'rgba(220,60,160,0.9)');
+      ctx.fillStyle = sunGrad; ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(w / 2, horizon, sunR, Math.PI, 0); ctx.fill();
+    }
+
+    // --- dust motes: slow drifting particles ---
+    const motes = Array.from({length: 80}, () => ({
+      x: Math.random(), y: Math.random(),
+      vx: (Math.random() - 0.5) * 0.0004,
+      vy: (Math.random() - 0.5) * 0.0004,
+      r: 0.6 + Math.random() * 1.8,
+      hue: 180 + Math.random() * 160,
+    }));
+    function drawParticles(jam) {
+      for (const m of motes) {
+        m.x += m.vx; m.y += m.vy;
+        if (m.x < 0 || m.x > 1) m.vx *= -1;
+        if (m.y < 0 || m.y > 1) m.vy *= -1;
+        const tw = 0.4 + 0.6 * Math.abs(
+          Math.sin(performance.now() * 0.0008 + m.x * 10));
+        ctx.fillStyle = `hsla(${m.hue}, 80%, 75%, ${jam ? 0.6 : 0.35 * tw})`;
+        ctx.beginPath();
+        ctx.arc(m.x * w, m.y * h, m.r * (jam ? 1.6 : 1), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // --- matrix rain: falling glyph columns ---
+    const rainCols = [];
+    function ensureRain() {
+      const cw = 14;
+      const want = Math.ceil(w / cw);
+      while (rainCols.length < want) {
+        rainCols.push({
+          y: -Math.random() * h,
+          v: 1.2 + Math.random() * 3.5,
+          len: 6 + Math.floor(Math.random() * 18),
+        });
+      }
+    }
+    function drawRain(jam) {
+      ensureRain();
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fillRect(0, 0, w, h);
+      ctx.font = '12px monospace';
+      const glyphs = 'ｱｲｳｴｵｶｷｸｹｺ01{}<>';
+      for (let i = 0; i < rainCols.length; i++) {
+        const c = rainCols[i];
+        for (let k = 0; k < c.len; k++) {
+          const y = c.y - k * 14;
+          const a = jam ? (1 - k / c.len) * 0.9 : (1 - k / c.len) * 0.55;
+          ctx.fillStyle = `hsla(${jam ? 300 : 140}, 80%, ${k === 0 ? 80 : 55}%, ${a})`;
+          const g = glyphs[(i + k + ((performance.now() * 0.02) | 0)) % glyphs.length];
+          ctx.fillText(g, i * 14, y);
+        }
+        c.y += c.v;
+        if (c.y > h + c.len * 14) { c.y = -20; c.v = 1.2 + Math.random() * 3.5; }
+      }
+    }
+
+    function tick() {
+      ctx.clearRect(0, 0, w, h);
+      const jam = document.body.classList.contains('jam');
+      switch (__bgMode) {
+        case 'aurora':    drawAurora(jam); break;
+        case 'grid':      drawGrid(jam); break;
+        case 'particles': drawParticles(jam); break;
+        case 'rain':      drawRain(jam); break;
+        case 'off':       break;
+        case 'stars':
+        default:          drawStars(jam);
+      }
       requestAnimationFrame(tick);
     }
     tick();
+  })();
+
+  window.__setBgMode = (m) => {
+    __bgMode = m;
+    try { localStorage.setItem('bgMode', m); } catch (e) {}
+  };
+
+  const ccBg = document.getElementById('cc-bg-opts');
+  if (ccBg) {
+    paintActive(ccBg, __bgMode);
+    ccBg.addEventListener('click', (e) => {
+      const b = e.target.closest('.cc-opt'); if (!b) return;
+      paintActive(ccBg, b.dataset.v);
+      window.__setBgMode(b.dataset.v);
+    });
+  }
+
+  // Voice commands (Web Speech API)
+  (function initVoice() {
+    const ccVoice = document.getElementById('cc-voice-opts');
+    const panel = document.getElementById('cc-voice-panel');
+    const mapTa = document.getElementById('cc-voice-map');
+    const heard = document.getElementById('cc-voice-heard');
+    if (!ccVoice || !mapTa) return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let enabled = false;
+    let recog = null;
+    let recentFire = 0;
+
+    const savedMap = localStorage.getItem('handsfreeVoiceMap');
+    mapTa.value = savedMap != null ? savedMap : 'telegram: cmd+t\\narc: cmd+a';
+    mapTa.addEventListener('input', () => {
+      try { localStorage.setItem('handsfreeVoiceMap', mapTa.value); } catch(e){}
+    });
+
+    function parseMap() {
+      const out = [];
+      for (const line of mapTa.value.split('\\n')) {
+        const m = line.match(/^\s*([^:]+?)\s*:\s*(.+?)\s*$/);
+        if (!m) continue;
+        out.push({ phrase: m[1].toLowerCase(), combo: m[2] });
+      }
+      return out;
+    }
+
+    function maybeFire(transcript) {
+      const txt = transcript.toLowerCase().trim();
+      if (!txt) return;
+      heard.textContent = '“' + txt.slice(0, 60) + '”';
+      const now = Date.now();
+      if (now - recentFire < 1200) return;
+      for (const { phrase, combo } of parseMap()) {
+        if (phrase && txt.includes(phrase)) {
+          recentFire = now;
+          fetch('/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'voice_hotkey', phrase, combo }),
+          }).catch(() => {});
+          heard.textContent = '→ ' + phrase + ' (' + combo + ')';
+          return;
+        }
+      }
+    }
+
+    function startRecog() {
+      if (!SR) { heard.textContent = 'Web Speech API unavailable'; return; }
+      recog = new SR();
+      recog.continuous = true;
+      recog.interimResults = true;
+      recog.lang = 'en-US';
+      recog.onresult = (ev) => {
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const r = ev.results[i];
+          if (r.isFinal || r[0].confidence > 0.5) {
+            maybeFire(r[0].transcript);
+          }
+        }
+      };
+      recog.onerror = (ev) => {
+        heard.textContent = 'err: ' + ev.error;
+      };
+      recog.onend = () => { if (enabled) { try { recog.start(); } catch(e){} } };
+      try { recog.start(); } catch (e) {}
+    }
+
+    function stopRecog() {
+      if (recog) { try { recog.stop(); } catch (e) {} recog = null; }
+      heard.textContent = '';
+    }
+
+    function setVoice(v) {
+      enabled = (v === 'on');
+      panel.style.display = enabled ? 'flex' : 'none';
+      paintActive(ccVoice, v);
+      try { localStorage.setItem('handsfreeVoiceOn', v); } catch(e) {}
+      if (enabled) startRecog(); else stopRecog();
+    }
+
+    ccVoice.addEventListener('click', (e) => {
+      const b = e.target.closest('.cc-opt'); if (!b) return;
+      setVoice(b.dataset.v);
+    });
+
+    const savedOn = localStorage.getItem('handsfreeVoiceOn') || 'off';
+    setVoice(savedOn);
   })();
 })();
 </script>
@@ -1298,6 +1787,7 @@ _prayer_start_pending = False
 _prayer_end_pending = False
 _prayer_active = False
 _boot_pending = False
+_clap_tick_pending = False
 _swipe_pending: Optional[str] = None  # "left" or "right"
 _dictation_pending = False
 _left_hand_y: Optional[float] = None
@@ -1309,9 +1799,10 @@ _jam_mode: bool = False
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
 _pointing_method: str = "finger"  # "head" | "finger" | "gaze"
 _click_method: str = "brow"       # primary (left) click gesture
+_cursor_sens: float = 0.7         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
 _double_click_on: bool = False    # double-tap primary within DBL window → double-click
-_wispr_method: str = "all"        # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|"apple_dictation"|"off"
+_wispr_method: str = "off"  # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|"apple_dictation"|"off"
 
 # Calibration centers (captured on cursor enable, per method).
 _finger_center: Optional[tuple] = None   # (fx, fy) in [0..1]
@@ -1399,12 +1890,34 @@ _prayer_hold_start: Optional[float] = None
 _prayer_active_since: Optional[float] = None
 _prayer_hands_lost_since: Optional[float] = None
 
+# Dictation trigger gesture. "prayer" (palms together — classic, but one hand
+# often occludes the other). "fingertips" (index tips touch — more robust
+# because hands don't overlap). "fist" (one-handed closed fist — single-hand,
+# no tracker fights). "off" disables gesture-triggered dictation entirely.
+_dict_gesture = "off"
+
+# How the gesture maps to Wispr/dictation key events:
+#   "hold"  — press down on gesture ENTER, release on gesture EXIT
+#             (Wispr Flow must be in hold-to-talk mode)
+#   "latch" — tap once on gesture ENTER, do nothing on EXIT; tap again on next
+#             ENTER (Wispr or Apple dictation must be in toggle/tap mode)
+_dict_mode = "latch"
+
 _hands_up_start: Optional[float] = None
 _last_hands_up_at = 0.0
 
 _clap_state = "far"  # or "close"
 _clap_times: List[float] = []
 _last_clap_boot_at = 0.0
+_last_two_hands_at = 0.0  # last time we saw 2 hands close together
+
+# Master enable — double clap toggles all gesture actions on/off.
+# Detection still runs so we can catch the re-enable clap.
+_system_enabled = True
+
+# Per-gesture enables, toggleable from Control Center.
+_scroll_gesture_enabled = False  # distinct from scroll speed preset
+_swipe_gesture_enabled = False
 
 _fn_pressed = False
 
@@ -1454,7 +1967,7 @@ print(f"[viewer] virtual screen: ({_virt_x0:.0f},{_virt_y0:.0f}) → "
       f"({_virt_x1:.0f},{_virt_y1:.0f})  size {_virt_w:.0f}x{_virt_h:.0f}  "
       f"(primary {_screen_w}x{_screen_h})", flush=True)
 
-_cursor_enabled = False
+_cursor_enabled = True
 _cursor_calibrated = False
 _cursor_calib_start: Optional[float] = None
 _yaw_center = 0.0
@@ -1596,6 +2109,131 @@ def _update_swipe(hands_list, now: float) -> Optional[str]:
     return None
 
 
+def _is_fist(hand) -> bool:
+    """Closed fist: tips of all 4 fingers curl below their middle joint.
+    Uses landmark y (lower = higher in image). For each finger, tip y
+    should be greater (lower down) than the PIP joint y."""
+    tips = [8, 12, 16, 20]
+    pips = [6, 10, 14, 18]
+    curled = 0
+    for t, p in zip(tips, pips):
+        if hand[t].y > hand[p].y + 0.015:
+            curled += 1
+    return curled >= 3
+
+
+def _fingertips_touching(hands_list) -> Optional[float]:
+    """Distance between the two index fingertips if both hands visible."""
+    if len(hands_list) < 2:
+        return None
+    p0 = hands_list[0][8]
+    p1 = hands_list[1][8]
+    return math.hypot(p0.x - p1.x, p0.y - p1.y)
+
+
+def _update_dict_gesture(hands_list, now: float) -> Optional[bool]:
+    """Dispatches to the active dictation gesture.
+    Returns True on ENTER, False on EXIT, None otherwise."""
+    if _dict_gesture == "off":
+        # Ensure we release if someone turns it off mid-hold.
+        if _prayer_active:
+            return _update_prayer_like_release()
+        return None
+    if _dict_gesture == "fingertips":
+        return _update_fingertips_gesture(hands_list, now)
+    if _dict_gesture == "fist":
+        return _update_fist_gesture(hands_list, now)
+    return _update_prayer(hands_list, now)
+
+
+def _update_prayer_like_release() -> bool:
+    """Force-release the active dictation gesture (shared across detectors)."""
+    global _prayer_active, _prayer_active_since, _prayer_hands_lost_since
+    global _prayer_hold_start
+    _prayer_active = False
+    _prayer_active_since = None
+    _prayer_hands_lost_since = None
+    _prayer_hold_start = None
+    print("[viewer] dict gesture release (mode-change)", flush=True)
+    return False
+
+
+def _update_fingertips_gesture(hands_list, now: float) -> Optional[bool]:
+    """Touching index fingertips (both hands visible) → hold."""
+    global _prayer_hold_start, _prayer_active
+    global _prayer_active_since, _prayer_hands_lost_since
+
+    CLOSE = 0.07
+    OPEN  = 0.14
+
+    if _prayer_active and _prayer_active_since is not None \
+            and now - _prayer_active_since > PRAYER_MAX_HOLD_S:
+        return _update_prayer_like_release()
+
+    d = _fingertips_touching(hands_list)
+    if d is None:
+        _prayer_hold_start = None
+        if _prayer_active:
+            if _prayer_hands_lost_since is None:
+                _prayer_hands_lost_since = now
+            elif now - _prayer_hands_lost_since > PRAYER_LOST_HANDS_GRACE_S:
+                return _update_prayer_like_release()
+        return None
+
+    _prayer_hands_lost_since = None
+    if d < CLOSE:
+        if _prayer_hold_start is None:
+            _prayer_hold_start = now
+        elif (not _prayer_active
+                and now - _prayer_hold_start >= PRAYER_ENTER_HOLD_S):
+            _prayer_active = True
+            _prayer_active_since = now
+            print(f"[viewer] fingertips enter d={d:.3f}", flush=True)
+            return True
+    elif d > OPEN:
+        _prayer_hold_start = None
+        if _prayer_active:
+            return _update_prayer_like_release()
+    return None
+
+
+def _update_fist_gesture(hands_list, now: float) -> Optional[bool]:
+    """One-handed closed fist → hold while the fist stays closed."""
+    global _prayer_hold_start, _prayer_active
+    global _prayer_active_since, _prayer_hands_lost_since
+
+    if _prayer_active and _prayer_active_since is not None \
+            and now - _prayer_active_since > PRAYER_MAX_HOLD_S:
+        return _update_prayer_like_release()
+
+    closed = any(_is_fist(h) for h in hands_list)
+
+    if not hands_list:
+        _prayer_hold_start = None
+        if _prayer_active:
+            if _prayer_hands_lost_since is None:
+                _prayer_hands_lost_since = now
+            elif now - _prayer_hands_lost_since > PRAYER_LOST_HANDS_GRACE_S:
+                return _update_prayer_like_release()
+        return None
+
+    _prayer_hands_lost_since = None
+    if closed:
+        if _prayer_hold_start is None:
+            _prayer_hold_start = now
+        elif (not _prayer_active
+                and now - _prayer_hold_start >= PRAYER_ENTER_HOLD_S):
+            _prayer_active = True
+            _prayer_active_since = now
+            print("[viewer] fist enter", flush=True)
+            return True
+    else:
+        _prayer_hold_start = None
+        if _prayer_active:
+            return _update_prayer_like_release()
+    return None
+
+
 def _update_prayer(hands_list, now: float) -> Optional[bool]:
     """Track prayer hold. Returns True on enter, False on exit, None otherwise.
 
@@ -1672,28 +2310,43 @@ def _update_hands_up(hands_list, now: float) -> bool:
     return False
 
 
-def _update_double_clap(hands_list, now: float) -> bool:
-    """Fire True on two quick claps (palms colliding twice) within the window."""
-    global _clap_state, _clap_times, _last_clap_boot_at
-    if len(hands_list) < 2:
-        return False
-    p0 = _palm_center(hands_list[0])
-    p1 = _palm_center(hands_list[1])
-    d = math.hypot(p0[0] - p1[0], p0[1] - p1[1])
-    if _clap_state == "far" and d < CLAP_CLOSE_THRESHOLD:
-        _clap_state = "close"
-        _clap_times.append(now)
-        _clap_times = [t for t in _clap_times if now - t < CLAP_GAP_MAX_S * 2]
-        if len(_clap_times) >= 2:
-            gap = _clap_times[-1] - _clap_times[-2]
-            if (CLAP_GAP_MIN_S < gap < CLAP_GAP_MAX_S
-                    and now - _last_clap_boot_at > CLAP_BOOT_COOLDOWN_S):
-                _last_clap_boot_at = now
-                _clap_times.clear()
-                return True
-    elif _clap_state == "close" and d > CLAP_FAR_THRESHOLD:
-        _clap_state = "far"
-    return False
+def _update_double_clap(hands_list, now: float):
+    """Returns (doubled: bool, single: bool).
+    single=True on each individual clap (for UI feedback).
+    doubled=True on valid double-clap."""
+    global _clap_state, _clap_times, _last_clap_boot_at, _last_two_hands_at
+    single = False
+    doubled = False
+
+    if len(hands_list) >= 2:
+        p0 = _palm_center(hands_list[0])
+        p1 = _palm_center(hands_list[1])
+        d = math.hypot(p0[0] - p1[0], p0[1] - p1[1])
+        _last_two_hands_at = now
+
+        if _clap_state == "far" and d < CLAP_CLOSE_THRESHOLD:
+            _clap_state = "close"
+            _clap_times.append(now)
+            _clap_times = [t for t in _clap_times
+                           if now - t < CLAP_GAP_MAX_S * 2]
+            single = True
+            if len(_clap_times) >= 2:
+                gap = _clap_times[-1] - _clap_times[-2]
+                if (CLAP_GAP_MIN_S < gap < CLAP_GAP_MAX_S
+                        and now - _last_clap_boot_at > CLAP_BOOT_COOLDOWN_S):
+                    _last_clap_boot_at = now
+                    _clap_times.clear()
+                    doubled = True
+        elif _clap_state == "close" and d > CLAP_FAR_THRESHOLD:
+            _clap_state = "far"
+    else:
+        # Hand(s) lost during collision is common. Only drop back to "far"
+        # after a grace window — otherwise we'd miss the release.
+        if (_clap_state == "close"
+                and now - _last_two_hands_at > CLAP_HAND_LOST_GRACE_S):
+            _clap_state = "far"
+
+    return doubled, single
 
 
 def _tap_wispr_cgevent(keycode: int, fn_flag: bool = False) -> None:
@@ -1712,6 +2365,64 @@ def _tap_wispr_cgevent(keycode: int, fn_flag: bool = False) -> None:
               flush=True)
     except Exception as e:
         print(f"[viewer] cgevent tap failed: {e}", flush=True)
+
+
+# macOS virtual key codes for voice-command hotkey firing.
+_VOICE_KEYS = {
+    "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
+    "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31, "p": 35,
+    "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9, "w": 13, "x": 7,
+    "y": 16, "z": 6,
+    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26,
+    "8": 28, "9": 25,
+    "space": 49, "enter": 36, "return": 36, "tab": 48, "esc": 53,
+    "escape": 53, "up": 126, "down": 125, "left": 123, "right": 124,
+    "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98,
+    "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111, "f13": 105,
+    "f14": 107, "f15": 113, "f16": 106, "f17": 64, "f18": 79, "f19": 80,
+}
+_VOICE_MODS = {
+    "cmd": 0x00100000, "command": 0x00100000, "meta": 0x00100000,
+    "shift": 0x00020000,
+    "opt": 0x00080000, "option": 0x00080000, "alt": 0x00080000,
+    "ctrl": 0x00040000, "control": 0x00040000,
+}
+
+
+def _fire_hotkey(combo: str) -> bool:
+    """Parse 'cmd+t' / 'cmd+shift+a' style strings and fire via CGEvent."""
+    if not _QUARTZ_OK:
+        print("[viewer] hotkey skipped: Quartz unavailable", flush=True)
+        return False
+    parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    if not parts:
+        return False
+    flags = 0
+    keycode: Optional[int] = None
+    for p in parts:
+        if p in _VOICE_MODS:
+            flags |= _VOICE_MODS[p]
+        elif p in _VOICE_KEYS:
+            keycode = _VOICE_KEYS[p]
+        else:
+            print(f"[viewer] hotkey unknown token: {p}", flush=True)
+            return False
+    if keycode is None:
+        return False
+    try:
+        down = CGEventCreateKeyboardEvent(None, keycode, True)
+        up = CGEventCreateKeyboardEvent(None, keycode, False)
+        if flags:
+            CGEventSetFlags(down, flags)
+            CGEventSetFlags(up, flags)
+        CGEventPost(kCGHIDEventTap, down)
+        CGEventPost(kCGHIDEventTap, up)
+        print(f"[viewer] hotkey fired: {combo} (kc={keycode} flags={flags:#x})",
+              flush=True)
+        return True
+    except Exception as e:
+        print(f"[viewer] hotkey failed: {e}", flush=True)
+        return False
 
 
 def _tap_wispr_applescript_fn() -> None:
@@ -1790,12 +2501,80 @@ def _tap_wispr_hotkey() -> None:
         _tap_wispr_cgevent(WISPR_KEYCODE, fn_flag=WISPR_USE_FN_FLAG)
 
 
+_held_keycode: Optional[int] = None  # currently-held wispr key, if any
+
+
+def _press_wispr_key_down() -> None:
+    """Press (but don't release) the wispr key for the active method.
+    Only cgevent methods support true hold — other methods fall back to tap."""
+    global _held_keycode
+    method = _wispr_method
+    if method == "off":
+        return
+    if method == "cgevent_f19":
+        kc, fn = 80, False
+    elif method == "cgevent_fn":
+        kc, fn = 63, True
+    else:
+        # Non-cgevent methods can't truly hold — tap once on entry.
+        _tap_wispr_hotkey()
+        return
+    if not _QUARTZ_OK:
+        return
+    try:
+        down = CGEventCreateKeyboardEvent(None, kc, True)
+        if fn:
+            CGEventSetFlags(down, kCGEventFlagMaskSecondaryFn)
+        CGEventPost(kCGHIDEventTap, down)
+        _held_keycode = kc
+        print(f"[viewer] wispr HOLD down key={kc} fn={fn}", flush=True)
+    except Exception as e:
+        print(f"[viewer] wispr hold-down failed: {e}", flush=True)
+
+
+def _release_wispr_key_up() -> None:
+    """Release the held wispr key. No-op if nothing is held."""
+    global _held_keycode
+    if _held_keycode is None or not _QUARTZ_OK:
+        return
+    try:
+        fn = (_held_keycode == 63)
+        up = CGEventCreateKeyboardEvent(None, _held_keycode, False)
+        if fn:
+            CGEventSetFlags(up, kCGEventFlagMaskSecondaryFn)
+        CGEventPost(kCGHIDEventTap, up)
+        print(f"[viewer] wispr HOLD up   key={_held_keycode}", flush=True)
+    except Exception as e:
+        print(f"[viewer] wispr hold-up failed: {e}", flush=True)
+    finally:
+        _held_keycode = None
+
+
 def _hold_wispr_key() -> None:
-    _tap_wispr_hotkey()
+    _press_wispr_key_down()
 
 
 def _release_wispr_key() -> None:
-    pass
+    _release_wispr_key_up()
+
+
+def _set_master(on: bool, source: str = "") -> None:
+    """Master on/off — drives _system_enabled and _cursor_enabled together.
+    When turning on, re-calibrates cursor so head position is re-centered."""
+    global _system_enabled, _cursor_enabled, _cursor_calibrated
+    global _cursor_calib_start, _finger_center, _gaze_center
+    _system_enabled = bool(on)
+    _cursor_enabled = bool(on)
+    if on:
+        _cursor_calibrated = False
+        _cursor_calib_start = time.time()
+        _finger_center = None
+        _gaze_center = None
+    else:
+        # Ensure any held dictation key isn't stuck after a hard off.
+        _release_wispr_key_up()
+    print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
+          + (f" ({source})" if source else ""), flush=True)
 
 
 def _fire_swipe_action(direction: str) -> None:
@@ -1932,8 +2711,8 @@ def _target_from_head(face_matrix) -> Optional[tuple]:
         d_v = 0.0
     mid_x = (_virt_x0 + _virt_x1) * 0.5
     mid_y = (_virt_y0 + _virt_y1) * 0.5
-    tx = mid_x + d_h * CURSOR_SENSITIVITY_X
-    ty = mid_y - d_v * CURSOR_SENSITIVITY_Y
+    tx = mid_x + d_h * CURSOR_SENSITIVITY_X * _cursor_sens
+    ty = mid_y - d_v * CURSOR_SENSITIVITY_Y * _cursor_sens
     return tx, ty
 
 
@@ -1944,8 +2723,8 @@ def _target_from_finger(hands_lm_list) -> Optional[tuple]:
         return None
     fx, fy = hand[8].x, hand[8].y
     cx, cy = _finger_center
-    dx = (fx - cx) * FINGER_GAIN_X
-    dy = (fy - cy) * FINGER_GAIN_Y
+    dx = (fx - cx) * FINGER_GAIN_X * _cursor_sens
+    dy = (fy - cy) * FINGER_GAIN_Y * _cursor_sens
     mid_x = (_virt_x0 + _virt_x1) * 0.5
     mid_y = (_virt_y0 + _virt_y1) * 0.5
     tx = mid_x + dx * _virt_w
@@ -1968,8 +2747,8 @@ def _target_from_gaze(face_landmarks) -> Optional[tuple]:
         return None
     gx, gy = iris
     cx, cy = _gaze_center
-    dx = (gx - cx) * GAZE_GAIN_X
-    dy = (gy - cy) * GAZE_GAIN_Y
+    dx = (gx - cx) * GAZE_GAIN_X * _cursor_sens
+    dy = (gy - cy) * GAZE_GAIN_Y * _cursor_sens
     mid_x = (_virt_x0 + _virt_x1) * 0.5
     mid_y = (_virt_y0 + _virt_y1) * 0.5
     tx = mid_x + dx * _virt_w
@@ -2185,15 +2964,8 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     global _yaw_center, _pitch_center, _cur_x, _cur_y
     global _finger_center, _gaze_center
 
-    if hands_up_toggle:
-        _cursor_enabled = not _cursor_enabled
-        print(f"[viewer] cursor {'ON' if _cursor_enabled else 'OFF'} "
-              f"({_pointing_method}/{_click_method})", flush=True)
-        if _cursor_enabled:
-            _cursor_calibrated = False
-            _cursor_calib_start = now
-            _finger_center = None
-            _gaze_center = None
+    # hands-overhead is now wired to master toggle in the capture loop; leave
+    # this hook here only for calibration state reset when master flips.
 
     # ---- calibration: capture neutral pose per method ---------------------
     if _cursor_enabled and not _cursor_calibrated:
@@ -2293,8 +3065,9 @@ def _update_smile(blendshapes) -> None:
 def _capture_loop() -> None:
     global _latest_jpeg, _bob_pending, _blink_pending
     global _prayer_start_pending, _prayer_end_pending, _boot_pending
+    global _clap_tick_pending
     global _swipe_pending, _left_hand_y, _right_hand_y
-    global _left_hand_x, _right_hand_x
+    global _left_hand_x, _right_hand_x, _system_enabled
     cam = Camera()
     for _ in range(30):
         ok, _ = cam.read()
@@ -2377,14 +3150,14 @@ def _capture_loop() -> None:
         nose_y_only = face_nose[1] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
         blinked = _detect_blink(face_blendshapes, now)
-        prayer_change = _update_prayer(hands_lm_list, now)
-        booted = _update_double_clap(hands_lm_list, now)
+        prayer_change = _update_dict_gesture(hands_lm_list, now)
+        booted, clap_tick = _update_double_clap(hands_lm_list, now)
         swipe_dir = _update_swipe(hands_lm_list, now)
         left_x, left_y, right_x, right_y = _split_hands_xy(hands_lm_list)
 
         hands_up_toggle = _update_hands_up(hands_lm_list, now)
         scroll_amt = _update_two_hand_scroll(hands_lm_list, now)
-        if scroll_amt != 0:
+        if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
             try:
                 pyautogui.scroll(scroll_amt, _pause=False)
             except Exception as e:
@@ -2400,19 +3173,34 @@ def _capture_loop() -> None:
             face_matrix, face_lms, hands_lm_list,
             face_blendshapes, now, hands_up_toggle,
         )
-        if _cursor_enabled and _cursor_calibrated:
+        if _cursor_enabled and _cursor_calibrated and _system_enabled:
             _dispatch_click(click_event, now)
 
-        if swipe_dir is not None and not _jam_mode:
+        if (swipe_dir is not None and not _jam_mode
+                and _system_enabled and _swipe_gesture_enabled):
             _fire_swipe_action(swipe_dir)
-        if prayer_change is True:
-            print("[viewer] prayer START → holding wispr key", flush=True)
-            _hold_wispr_key()
-        elif prayer_change is False:
-            print("[viewer] prayer END → releasing wispr key", flush=True)
-            _release_wispr_key()
-        if booted:
-            print("[viewer] double clap → boot", flush=True)
+        # Master toggle is UI-click only — gesture triggers (hands-overhead,
+        # double-clap) were unreliable and have been removed.
+        _ = hands_up_toggle  # kept for potential future use
+
+        if prayer_change is True and _system_enabled:
+            if _dict_mode == "latch":
+                print("[viewer] dict gesture → latch START tap", flush=True)
+                _tap_wispr_hotkey()
+            else:
+                print("[viewer] dict gesture START → holding key", flush=True)
+                _hold_wispr_key()
+        elif prayer_change is False and _system_enabled:
+            if _dict_mode == "hold":
+                print("[viewer] dict gesture END → releasing key", flush=True)
+                _release_wispr_key()
+            elif _dict_mode == "latch":
+                # Also tap on EXIT so Wispr (or Apple) in toggle-mode gets
+                # the second press to stop recording.
+                print("[viewer] dict gesture → latch STOP tap", flush=True)
+                _tap_wispr_hotkey()
+        # Double-clap master toggle removed — button-only from now on.
+        _ = booted
 
         with _state_lock:
             if bobbed:
@@ -2425,6 +3213,8 @@ def _capture_loop() -> None:
                 _prayer_end_pending = True
             if booted:
                 _boot_pending = True
+            if clap_tick:
+                _clap_tick_pending = True
             if swipe_dir is not None:
                 _swipe_pending = swipe_dir
             _left_hand_y = left_y
@@ -2575,7 +3365,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         global _wispr_method, _scroll_sens
-        global _right_click_method, _double_click_on
+        global _right_click_method, _double_click_on, _cursor_sens
+        global _scroll_gesture_enabled, _swipe_gesture_enabled
         if self.path == "/command":
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -2674,6 +3465,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "scrollSens": _scroll_sens,
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
+                        "cursorSens": round(_cursor_sens, 2),
                     }).encode(),
                 )
                 return
@@ -2706,14 +3498,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "doubleClick": _double_click_on}).encode(),
                 )
                 return
-            if action == "scroll_sens":
-                sens = data.get("sens")
-                if sens in SCROLL_GAIN_MAP:
-                    _scroll_sens = sens
-                print(f"[viewer] scroll sens = {_scroll_sens}", flush=True)
+            if action == "cursor_sens":
+                try:
+                    v = float(data.get("value", _cursor_sens))
+                except (TypeError, ValueError):
+                    v = _cursor_sens
+                _cursor_sens = max(0.15, min(2.5, v))
+                print(f"[viewer] cursor sens = {_cursor_sens:.2f}", flush=True)
                 self._write_status(
                     200, "application/json",
-                    json.dumps({"ok": True, "scrollSens": _scroll_sens}).encode(),
+                    json.dumps({"ok": True, "cursorSens": _cursor_sens}).encode(),
+                )
+                return
+            if action == "scroll_sens":
+                sens = data.get("sens")
+                if sens == "off":
+                    _scroll_gesture_enabled = False
+                elif sens in SCROLL_GAIN_MAP:
+                    _scroll_gesture_enabled = True
+                    _scroll_sens = sens
+                print(f"[viewer] scroll gesture = "
+                      f"{'ON:' + _scroll_sens if _scroll_gesture_enabled else 'OFF'}",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True,
+                        "scrollSens": (_scroll_sens
+                                       if _scroll_gesture_enabled else "off"),
+                    }).encode(),
+                )
+                return
+            if action == "swipe_gesture":
+                v = data.get("on")
+                if isinstance(v, bool):
+                    _swipe_gesture_enabled = v
+                elif v in ("on", "off"):
+                    _swipe_gesture_enabled = (v == "on")
+                print(f"[viewer] swipe gesture = "
+                      f"{'ON' if _swipe_gesture_enabled else 'OFF'}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True,
+                        "swipeGesture": _swipe_gesture_enabled,
+                    }).encode(),
                 )
                 return
             if action == "wispr_test":
@@ -2722,6 +3551,92 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     200, "application/json",
                     json.dumps({"ok": True, "fired": _wispr_method}).encode(),
                 )
+                return
+            if action == "wispr_hold_test":
+                def _hold_then_release():
+                    _press_wispr_key_down()
+                    time.sleep(2.0)
+                    _release_wispr_key_up()
+                threading.Thread(target=_hold_then_release, daemon=True).start()
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "method": _wispr_method}).encode(),
+                )
+                return
+            if action == "master":
+                _set_master(bool(data.get("on")), source="ui")
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True, "systemEnabled": _system_enabled,
+                    }).encode(),
+                )
+                return
+            if action == "clap_preset":
+                global _clap_preset
+                global CLAP_CLOSE_THRESHOLD, CLAP_FAR_THRESHOLD
+                global CLAP_GAP_MIN_S, CLAP_GAP_MAX_S
+                global CLAP_BOOT_COOLDOWN_S, CLAP_HAND_LOST_GRACE_S
+                preset = data.get("preset")
+                if preset == "off" or preset in CLAP_PRESETS:
+                    _clap_preset = preset
+                    if preset in CLAP_PRESETS:
+                        (CLAP_CLOSE_THRESHOLD, CLAP_FAR_THRESHOLD,
+                         CLAP_GAP_MIN_S, CLAP_GAP_MAX_S,
+                         CLAP_BOOT_COOLDOWN_S,
+                         CLAP_HAND_LOST_GRACE_S) = CLAP_PRESETS[preset]
+                    print(f"[viewer] clap preset = {preset}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "clapPreset": _clap_preset}).encode(),
+                )
+                return
+            if action == "dict_gesture":
+                global _dict_gesture
+                g = data.get("gesture")
+                if g in ("prayer", "fingertips", "fist", "off"):
+                    _dict_gesture = g
+                    # If switching while held, release so we don't get stuck.
+                    if _prayer_active:
+                        _update_prayer_like_release()
+                        _release_wispr_key_up()
+                    print(f"[viewer] dict gesture = {g}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "dictGesture": _dict_gesture}).encode(),
+                )
+                return
+            if action == "dict_mode":
+                global _dict_mode
+                m = data.get("mode")
+                if m in ("hold", "latch"):
+                    _dict_mode = m
+                    # Don't leave a held key dangling when switching to latch.
+                    _release_wispr_key_up()
+                    print(f"[viewer] dict mode = {m}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "dictMode": _dict_mode}).encode(),
+                )
+                return
+            if action == "voice_hotkey":
+                combo = (data.get("combo") or "").strip()
+                phrase = (data.get("phrase") or "").strip()
+                ok = _fire_hotkey(combo) if combo else False
+                print(f"[viewer] voice '{phrase}' → {combo} ok={ok}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": ok}).encode(),
+                )
+                return
+            if action == "quit":
+                print("[viewer] quit requested from UI", flush=True)
+                self._write_status(
+                    200, "application/json", b'{"ok":true,"quitting":true}',
+                )
+                threading.Timer(
+                    0.2, lambda: os.kill(os.getpid(), signal.SIGTERM),
+                ).start()
                 return
             self._write_status(400, "text/plain", b"unknown action")
             return
@@ -2771,12 +3686,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     global _bob_pending, _blink_pending
                     global _prayer_start_pending, _prayer_end_pending
                     global _boot_pending, _swipe_pending, _dictation_pending
+                    global _clap_tick_pending
                     with _state_lock:
                         bob = _bob_pending
                         blink = _blink_pending
                         prayer_start = _prayer_start_pending
                         prayer_end = _prayer_end_pending
                         boot = _boot_pending
+                        clap_tick = _clap_tick_pending
                         swipe = _swipe_pending
                         dictation = _dictation_pending
                         _bob_pending = False
@@ -2784,6 +3701,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         _prayer_start_pending = False
                         _prayer_end_pending = False
                         _boot_pending = False
+                        _clap_tick_pending = False
                         _swipe_pending = None
                         _dictation_pending = False
                         smile = _smile_val
@@ -2811,12 +3729,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "scrollSens": _scroll_sens,
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
+                        "cursorSens": round(_cursor_sens, 2),
+                        "systemEnabled": _system_enabled,
+                        "scrollGesture": _scroll_gesture_enabled,
+                        "swipeGesture": _swipe_gesture_enabled,
+                        "clapPreset": _clap_preset,
+                        "dictGesture": _dict_gesture,
+                        "dictMode": _dict_mode,
                     }
                     if bob: payload["bob"] = True
                     if blink: payload["blink"] = True
                     if prayer_start: payload["prayerStart"] = True
                     if prayer_end: payload["prayerEnd"] = True
                     if boot: payload["boot"] = True
+                    if clap_tick: payload["clapTick"] = True
                     if swipe: payload["swipe"] = swipe
                     if dictation: payload["dictation"] = True
                     line = f"data: {json.dumps(payload)}\n\n"
@@ -2838,7 +3764,42 @@ class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def _kill_existing_instance() -> None:
+    """If another viewer is already on PORT, kill it so we stay a singleton."""
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f"tcp:{PORT}"], stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+    pids = [p for p in out.split() if p and p.isdigit()
+            and int(p) != os.getpid()]
+    if not pids:
+        return
+    print(f"[viewer] killing prior instance(s) on :{PORT}: {pids}", flush=True)
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for _ in range(20):
+        time.sleep(0.1)
+        try:
+            subprocess.check_output(
+                ["lsof", "-ti", f"tcp:{PORT}"], stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            return
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.3)
+
+
 def main() -> None:
+    _kill_existing_instance()
     t = threading.Thread(target=_capture_loop, daemon=True)
     t.start()
 
