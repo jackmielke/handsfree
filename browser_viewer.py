@@ -421,6 +421,13 @@ HTML = """<!doctype html>
       </div>
     </div>
     <div class="cc-row">
+      <div class="cc-label">tab swipe</div>
+      <div class="cc-opts" id="cc-tabswipe-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="on">on</button>
+      </div>
+    </div>
+    <div class="cc-row">
       <div class="cc-label">swipe pages</div>
       <div class="cc-opts" id="cc-swipe-opts">
         <button class="cc-opt" data-v="off">off</button>
@@ -922,6 +929,17 @@ HTML = """<!doctype html>
     const b = e.target.closest('.cc-opt'); if (!b) return;
     paintActive(ccScroll, b.dataset.v);
     postScroll(b.dataset.v);
+  });
+
+  const ccTabSwipe = document.getElementById('cc-tabswipe-opts');
+  ccTabSwipe.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccTabSwipe, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'tab_swipe', on: b.dataset.v === 'on' }),
+    }).catch(() => {});
   });
 
   const ccSwipe = document.getElementById('cc-swipe-opts');
@@ -1434,6 +1452,7 @@ HTML = """<!doctype html>
         paintActive(ccScroll, msg.scrollSens);
       }
       if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
+      if ('tabSwipe' in msg) paintActive(ccTabSwipe, msg.tabSwipe ? 'on' : 'off');
       if ('cursorSens' in msg) paintSens(msg.cursorSens);
       if ('systemEnabled' in msg) {
         document.body.classList.toggle('system-off', !msg.systemEnabled);
@@ -1879,6 +1898,19 @@ _scroll_mode: str = "fist"
 _fist_scroll_prev: Optional[tuple] = None  # (y, x) normalized
 _fist_scroll_accum_y: float = 0.0
 _fist_scroll_accum_x: float = 0.0
+
+# Two-hand tab-swipe: both hands up, one stays still (anchor), the other
+# sweeps sideways → fires Cmd+Shift+] / Cmd+Shift+[ to switch browser tabs.
+TAB_SWIPE_WINDOW_S = 0.45
+TAB_SWIPE_MIN_DX = 0.30
+TAB_SWIPE_ANCHOR_MAX_DX = 0.10
+TAB_SWIPE_Y_MAX = 0.60
+TAB_SWIPE_COOLDOWN_S = 1.0
+TAB_SWIPE_NEXT_COMBO = "cmd+shift+]"
+TAB_SWIPE_PREV_COMBO = "cmd+shift+["
+_tab_swipe_hist: Deque[tuple] = deque(maxlen=60)
+_last_tab_swipe_at: float = 0.0
+_tab_swipe_enabled: bool = True
 BROW_CLICK_THRESHOLD = 0.55
 BROW_CLICK_COOLDOWN_S = 0.7
 WINK_CLOSED_THRESHOLD = 0.55   # one eye must be this closed…
@@ -2682,6 +2714,52 @@ def _update_motion(face_nose, hand_wrists) -> None:
     _prev_hand_wrists = hand_wrists
 
 
+def _update_tab_swipe(hands_list, now: float) -> Optional[str]:
+    """Two hands above the shoulder line. One holds still (anchor), the
+    other sweeps sideways. Returns "next" or "prev", or None.
+
+    Gate is loose on direction so either hand can be the sweeper — user
+    just lifts both and moves one. Anchor-stillness check guards against
+    two-hand scroll (both hands move together)."""
+    global _last_tab_swipe_at
+    if not _tab_swipe_enabled or len(hands_list) != 2:
+        _tab_swipe_hist.clear()
+        return None
+    w0 = hands_list[0][0]
+    w1 = hands_list[1][0]
+    if w0.y > TAB_SWIPE_Y_MAX or w1.y > TAB_SWIPE_Y_MAX:
+        _tab_swipe_hist.clear()
+        return None
+    # Sort L→R so anchor/sweeper labels are stable across frames.
+    if w0.x < w1.x:
+        lx, rx = float(w0.x), float(w1.x)
+    else:
+        lx, rx = float(w1.x), float(w0.x)
+    _tab_swipe_hist.append((now, lx, rx))
+    while _tab_swipe_hist and now - _tab_swipe_hist[0][0] > TAB_SWIPE_WINDOW_S:
+        _tab_swipe_hist.popleft()
+    if len(_tab_swipe_hist) < 5:
+        return None
+    dl = _tab_swipe_hist[-1][1] - _tab_swipe_hist[0][1]
+    dr = _tab_swipe_hist[-1][2] - _tab_swipe_hist[0][2]
+    direction: Optional[str] = None
+    # Positive dx = hand moved toward the right side of the image. Because
+    # the frame is mirrored for the UI, image-right = user's right hand
+    # moving leftward in real space. Pick mapping that matches macOS tab
+    # switch: sweep to the right → next tab, left → prev.
+    if abs(dr) > TAB_SWIPE_MIN_DX and abs(dl) < TAB_SWIPE_ANCHOR_MAX_DX:
+        direction = "next" if dr > 0 else "prev"
+    elif abs(dl) > TAB_SWIPE_MIN_DX and abs(dr) < TAB_SWIPE_ANCHOR_MAX_DX:
+        direction = "next" if dl > 0 else "prev"
+    if direction is None:
+        return None
+    if now - _last_tab_swipe_at < TAB_SWIPE_COOLDOWN_S:
+        return None
+    _last_tab_swipe_at = now
+    _tab_swipe_hist.clear()
+    return direction
+
+
 def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
     """Single-hand fist scroll. Close one hand → wrist Y/X motion scrolls.
     Returns (vertical, horizontal) scroll amounts. Sets `_scroll_active`
@@ -3243,6 +3321,15 @@ def _capture_loop() -> None:
         left_x, left_y, right_x, right_y = _split_hands_xy(hands_lm_list)
 
         hands_up_toggle = _update_hands_up(hands_lm_list, now)
+        # Two-hand tab swipe → Cmd+Shift+]/[.
+        tab_dir = _update_tab_swipe(hands_lm_list, now)
+        if tab_dir is not None and _system_enabled and not _jam_mode:
+            combo = (TAB_SWIPE_NEXT_COMBO if tab_dir == "next"
+                     else TAB_SWIPE_PREV_COMBO)
+            _fire_hotkey(combo)
+            print(f"[viewer] tab swipe {tab_dir} → {combo}", flush=True)
+            with _state_lock:
+                _swipe_pending = f"tab-{tab_dir}"
         if _scroll_mode == "fist":
             v_amt, h_amt = _update_fist_scroll(hands_lm_list, now)
             if _system_enabled and _scroll_gesture_enabled:
@@ -3642,6 +3729,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }).encode(),
                 )
                 return
+            if action == "tab_swipe":
+                global _tab_swipe_enabled
+                v = data.get("on")
+                if isinstance(v, bool):
+                    _tab_swipe_enabled = v
+                elif v in ("on", "off"):
+                    _tab_swipe_enabled = (v == "on")
+                print(f"[viewer] tab swipe = "
+                      f"{'ON' if _tab_swipe_enabled else 'OFF'}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "tabSwipe": _tab_swipe_enabled}).encode(),
+                )
+                return
             if action == "swipe_gesture":
                 v = data.get("on")
                 if isinstance(v, bool):
@@ -3847,6 +3948,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "systemEnabled": _system_enabled,
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
+                        "tabSwipe": _tab_swipe_enabled,
                         "clapPreset": _clap_preset,
                         "dictGesture": _dict_gesture,
                         "dictMode": _dict_mode,
