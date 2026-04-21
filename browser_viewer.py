@@ -184,6 +184,15 @@ HTML = """<!doctype html>
     border:1px solid #2a2a38; z-index:9999; pointer-events:none; }
   #heard .final   { color: var(--accent); }
   #heard .interim { color: var(--dim); font-style: italic; }
+  .vt-q { cursor:pointer; font-size:10px; padding:5px 10px;
+    border-radius:999px; border:1px solid #2a3550; background:#15151c;
+    color:var(--ink); }
+  .vt-q:hover { background:#1b2530; border-color:#6ee7b7; color:var(--fg); }
+  #vt-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
+    text-transform:uppercase; font-weight:700; padding:6px 14px;
+    border-radius:999px; border:1px solid #2a2a38; background:#15151c;
+    color:var(--dim); }
+  #vt-btn.on { background:#6ee7b7; color:#05170f; border-color:#6ee7b7; }
   #jam-btn, #cc-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
     text-transform:uppercase; font-weight:700; padding:6px 14px;
     border-radius:999px; border:1px solid #2a2a38; background:#15151c;
@@ -299,6 +308,7 @@ HTML = """<!doctype html>
     </div>
     <div style="flex:1"></div>
     <button id="cc-btn"  type="button">control center</button>
+    <button id="vt-btn"  type="button">voice test</button>
     <button id="jam-btn" type="button">jam mode</button>
     <button id="master-btn" type="button" title="Master on/off. Double-clap also toggles."
       style="font-size:11px; letter-spacing:0.18em; font-weight:800;
@@ -483,6 +493,99 @@ HTML = """<!doctype html>
       in sequence to help you discover which one wakes Wispr.
     </div>
   </div>
+
+  <!-- Voice Test panel. Dedicated UI for getting "open telegram" working
+       end-to-end. Status, live transcript, quick-test buttons, text sim,
+       event log. Toggled by the "voice test" button in the top bar. -->
+  <div id="vt-panel" style="display:none; position:absolute; top:70px;
+       right:16px; width:380px; max-width:90vw; background:#0f1420;
+       border:1px solid #2a3550; border-radius:12px; padding:14px;
+       box-shadow:0 10px 40px rgba(0,0,0,0.5); z-index:50;
+       font-size:12px; line-height:1.5;">
+    <div style="display:flex; align-items:center; gap:8px;
+         margin-bottom:10px;">
+      <b style="letter-spacing:0.1em; text-transform:uppercase;
+         font-size:11px; color:var(--accent);">voice test</b>
+      <div style="flex:1"></div>
+      <button id="vt-close" type="button"
+        style="background:none; border:none; color:var(--dim);
+        font-size:16px; cursor:pointer; padding:0;">×</button>
+    </div>
+
+    <div style="display:flex; gap:6px; flex-wrap:wrap;
+         margin-bottom:10px;">
+      <span id="vt-mic-pill"
+        style="font-size:10px; letter-spacing:0.14em;
+        text-transform:uppercase; padding:3px 8px; border-radius:999px;
+        background:#1a1a24; color:var(--dim);">mic: ?</span>
+      <span id="vt-listen-pill"
+        style="font-size:10px; letter-spacing:0.14em;
+        text-transform:uppercase; padding:3px 8px; border-radius:999px;
+        background:#1a1a24; color:var(--dim);">listening: off</span>
+    </div>
+
+    <div style="display:flex; gap:6px; margin-bottom:10px;">
+      <button id="vt-request-mic" type="button"
+        style="flex:1; padding:6px 10px; background:#1b2530;
+        color:var(--fg); border:1px solid #2a3550; border-radius:6px;
+        font-size:11px; cursor:pointer;">grant mic permission</button>
+      <button id="vt-toggle" type="button"
+        style="flex:1; padding:6px 10px; background:var(--accent);
+        color:#05170f; border:none; border-radius:6px; font-size:11px;
+        font-weight:700; cursor:pointer;">start listening</button>
+    </div>
+
+    <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
+      live transcript
+    </div>
+    <div id="vt-transcript"
+      style="min-height:44px; background:#05080f; border:1px solid #1a2030;
+      border-radius:6px; padding:8px 10px; margin-bottom:10px;
+      color:var(--fg); font-family:ui-monospace,Menlo,monospace;
+      font-size:12px;">
+      <span style="color:var(--dim);">(nothing yet)</span>
+    </div>
+
+    <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
+      quick tests (click to fire — no voice needed)
+    </div>
+    <div id="vt-quick"
+      style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px;">
+      <button data-phrase="open telegram" class="vt-q">open telegram</button>
+      <button data-phrase="open notion"   class="vt-q">open notion</button>
+      <button data-phrase="open arc"      class="vt-q">open arc</button>
+      <button data-phrase="open safari"   class="vt-q">open safari</button>
+      <button data-phrase="open slack"    class="vt-q">open slack</button>
+      <button data-phrase="open spotify"  class="vt-q">open spotify</button>
+    </div>
+
+    <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
+      simulate a phrase (type instead of speaking)
+    </div>
+    <div style="display:flex; gap:4px; margin-bottom:10px;">
+      <input id="vt-sim-input" type="text"
+        placeholder='e.g. "open notion"'
+        style="flex:1; background:#05080f; color:var(--fg);
+        border:1px solid #2a3550; border-radius:6px; padding:6px 8px;
+        font-size:12px;">
+      <button id="vt-sim-fire" type="button"
+        style="padding:6px 10px; background:#1b2530; color:var(--fg);
+        border:1px solid #2a3550; border-radius:6px; font-size:11px;
+        cursor:pointer;">fire</button>
+    </div>
+
+    <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
+      event log
+    </div>
+    <div id="vt-log"
+      style="max-height:180px; overflow-y:auto; background:#05080f;
+      border:1px solid #1a2030; border-radius:6px; padding:6px 8px;
+      font-family:ui-monospace,Menlo,monospace; font-size:11px;
+      line-height:1.6;">
+      <div style="color:var(--dim);">ready.</div>
+    </div>
+  </div>
+
   <div class="stage">
     <img src="/stream" alt="camera">
     <div class="side">
@@ -690,12 +793,15 @@ HTML = """<!doctype html>
             + `<span class="interim">${escapeHtml(interim)}</span>`
           : `<span class="interim">${escapeHtml(interim)}</span>`;
       }
-      const cmd = matchCommand((finalText || interim).trim());
+      if (window.__vtTranscript) window.__vtTranscript(finalText, interim);
+      const phrase = (finalText || interim).trim();
+      const cmd = matchCommand(phrase);
       const now = Date.now();
       if (cmd && cmd.target !== undefined && now - lastFired > 1500) {
         lastFired = now;
         flashBob();
         sendCommand(cmd);
+        if (window.__vtFire) window.__vtFire(phrase, cmd, 'voice');
       }
     };
     return r;
@@ -761,6 +867,145 @@ HTML = """<!doctype html>
     unlockAudio();
     setJamMode(!jamMode);
   });
+
+  // Voice Test panel: dedicated UI for verifying "open telegram" etc.
+  (function initVoiceTest() {
+    const btn       = document.getElementById('vt-btn');
+    const panel     = document.getElementById('vt-panel');
+    const closeBtn  = document.getElementById('vt-close');
+    const micPill   = document.getElementById('vt-mic-pill');
+    const listenPill= document.getElementById('vt-listen-pill');
+    const reqMicBtn = document.getElementById('vt-request-mic');
+    const toggleBtn = document.getElementById('vt-toggle');
+    const transEl   = document.getElementById('vt-transcript');
+    const quickWrap = document.getElementById('vt-quick');
+    const simInput  = document.getElementById('vt-sim-input');
+    const simFire   = document.getElementById('vt-sim-fire');
+    const logEl     = document.getElementById('vt-log');
+    if (!btn || !panel) return;
+
+    let open = false;
+    function setOpen(on) {
+      open = on;
+      panel.style.display = on ? 'block' : 'none';
+      btn.classList.toggle('on', on);
+    }
+    btn.addEventListener('click', () => setOpen(!open));
+    closeBtn.addEventListener('click', () => setOpen(false));
+
+    function pill(el, state, text) {
+      el.textContent = text;
+      if (state === 'on')       { el.style.background = '#6ee7b7'; el.style.color = '#05170f'; }
+      else if (state === 'err') { el.style.background = '#f87171'; el.style.color = '#1a0707'; }
+      else                      { el.style.background = '#1a1a24'; el.style.color = 'var(--dim)'; }
+    }
+
+    function stamp() {
+      const d = new Date();
+      return d.toTimeString().slice(0, 8);
+    }
+    const MAX_LOG = 40;
+    function log(kind, text, color) {
+      const row = document.createElement('div');
+      row.style.color = color || 'var(--fg)';
+      row.textContent = `[${stamp()}] ${kind}: ${text}`;
+      // On first entry, clear the "ready." placeholder.
+      if (logEl.children.length === 1 && logEl.children[0].textContent === 'ready.') {
+        logEl.innerHTML = '';
+      }
+      logEl.appendChild(row);
+      while (logEl.children.length > MAX_LOG) logEl.removeChild(logEl.firstChild);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // Mic permission detection — best-effort via Permissions API.
+    async function refreshMicStatus() {
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          const p = await navigator.permissions.query({ name: 'microphone' });
+          if (p.state === 'granted')       pill(micPill, 'on',  'mic: granted');
+          else if (p.state === 'denied')   pill(micPill, 'err', 'mic: denied');
+          else                             pill(micPill, 'off', 'mic: ask');
+          p.onchange = refreshMicStatus;
+          return;
+        }
+      } catch {}
+      pill(micPill, 'off', 'mic: ?');
+    }
+    refreshMicStatus();
+
+    reqMicBtn.addEventListener('click', async () => {
+      log('mic', 'requesting permission…', 'var(--dim)');
+      const ok = await ensureMic();
+      log('mic', ok ? 'granted' : 'denied', ok ? '#6ee7b7' : '#f87171');
+      refreshMicStatus();
+    });
+
+    function paintListening() {
+      if (voiceWanted) pill(listenPill, 'on',  'listening: on');
+      else             pill(listenPill, 'off', 'listening: off');
+      toggleBtn.textContent = voiceWanted ? 'stop listening' : 'start listening';
+    }
+    paintListening();
+
+    toggleBtn.addEventListener('click', async () => {
+      if (voiceWanted) {
+        stopVoice();
+        log('listen', 'stopped', 'var(--dim)');
+      } else {
+        await startVoice();
+        log('listen', voiceWanted ? 'started' : 'failed to start',
+            voiceWanted ? '#6ee7b7' : '#f87171');
+      }
+      paintListening();
+      refreshMicStatus();
+    });
+
+    // Keep pill in sync if voice state changes via other paths.
+    setInterval(paintListening, 750);
+
+    // Expose hooks the recognizer's onresult calls into.
+    window.__vtTranscript = (finalText, interim) => {
+      const f = (finalText || '').trim();
+      const i = (interim  || '').trim();
+      if (!f && !i) return;
+      transEl.innerHTML =
+        (f ? `<span style="color:var(--fg)">${escapeHtml(f)}</span> ` : '') +
+        (i ? `<span style="color:var(--dim)">${escapeHtml(i)}</span>` : '');
+      if (f) log('heard', f, 'var(--fg)');
+    };
+    window.__vtFire = (phrase, cmd, source) => {
+      const src = source || 'voice';
+      if (!cmd) {
+        log(src, `"${phrase}" → no match`, '#f87171');
+        return;
+      }
+      log(src, `"${phrase}" → ${cmd.action} ${cmd.target || ''}`, '#6ee7b7');
+    };
+
+    // Quick-test buttons.
+    quickWrap.querySelectorAll('.vt-q').forEach(b => {
+      b.addEventListener('click', () => {
+        const phrase = b.dataset.phrase || '';
+        const cmd = matchCommand(phrase);
+        window.__vtFire(phrase, cmd, 'click');
+        if (cmd) sendCommand(cmd);
+      });
+    });
+
+    // Sim input — type + fire.
+    function fireSim() {
+      const phrase = (simInput.value || '').trim();
+      if (!phrase) return;
+      const cmd = matchCommand(phrase);
+      window.__vtFire(phrase, cmd, 'typed');
+      if (cmd) sendCommand(cmd);
+    }
+    simFire.addEventListener('click', fireSim);
+    simInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') fireSim();
+    });
+  })();
 
   // Control Center: pointing/click method picker.
   const ccBtn   = document.getElementById('cc-btn');
