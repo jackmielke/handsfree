@@ -404,7 +404,15 @@ HTML = """<!doctype html>
       </div>
     </div>
     <div class="cc-row">
-      <div class="cc-label">scroll</div>
+      <div class="cc-label">scroll mode</div>
+      <div class="cc-opts" id="cc-scroll-mode-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="fist">fist</button>
+        <button class="cc-opt" data-v="two_hands">two hands</button>
+      </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">scroll speed</div>
       <div class="cc-opts" id="cc-scroll-opts">
         <button class="cc-opt" data-v="off">off</button>
         <button class="cc-opt" data-v="gentle">gentle</button>
@@ -888,6 +896,17 @@ HTML = """<!doctype html>
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'double_click', on: b.dataset.v === 'on' }),
+    }).catch(() => {});
+  });
+
+  const ccScrollMode = document.getElementById('cc-scroll-mode-opts');
+  ccScrollMode.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccScrollMode, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'scroll_mode', mode: b.dataset.v }),
     }).catch(() => {});
   });
 
@@ -1407,6 +1426,7 @@ HTML = """<!doctype html>
             x.classList.toggle('on', x.dataset.v === msg.wispr);
         });
       }
+      if ('scrollMode' in msg) paintActive(ccScrollMode, msg.scrollMode);
       if ('scrollGesture' in msg) {
         const sv = msg.scrollGesture ? (msg.scrollSens || 'normal') : 'off';
         paintActive(ccScroll, sv);
@@ -1851,6 +1871,14 @@ SCROLL_ZONE_Y_MAX  = 0.85   # both wrists above waist
 SCROLL_FRAME_DEAD  = 0.0015 # ignore per-frame jitter below this
 SCROLL_GAIN_MAP = {"gentle": 80.0, "normal": 180.0, "zippy": 360.0}
 _scroll_sens: str = "normal"
+# Scroll gesture mode. "fist" = close one hand into a fist and move up/down
+# to scroll (new default — works single-handed, cursor freezes while fist
+# is closed). "two_hands" = legacy mode (raise both hands then move them).
+# "off" = disabled.
+_scroll_mode: str = "fist"
+_fist_scroll_prev: Optional[tuple] = None  # (y, x) normalized
+_fist_scroll_accum_y: float = 0.0
+_fist_scroll_accum_x: float = 0.0
 BROW_CLICK_THRESHOLD = 0.55
 BROW_CLICK_COOLDOWN_S = 0.7
 WINK_CLOSED_THRESHOLD = 0.55   # one eye must be this closed…
@@ -1916,7 +1944,7 @@ _last_two_hands_at = 0.0  # last time we saw 2 hands close together
 _system_enabled = True
 
 # Per-gesture enables, toggleable from Control Center.
-_scroll_gesture_enabled = False  # distinct from scroll speed preset
+_scroll_gesture_enabled = True  # distinct from scroll speed preset
 _swipe_gesture_enabled = False
 
 _fn_pressed = False
@@ -2650,6 +2678,61 @@ def _update_motion(face_nose, hand_wrists) -> None:
     _prev_hand_wrists = hand_wrists
 
 
+def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
+    """Single-hand fist scroll. Close one hand → wrist Y/X motion scrolls.
+    Returns (vertical, horizontal) scroll amounts. Sets `_scroll_active`
+    so the cursor freezes while scrolling.
+
+    Use any hand that's currently a fist. The horizontal channel is
+    softer (gain/3) since horizontal scroll is noisier.
+    """
+    global _fist_scroll_prev, _fist_scroll_accum_y, _fist_scroll_accum_x
+    global _scroll_active
+    if _jam_mode or not hands_list:
+        _fist_scroll_prev = None
+        _fist_scroll_accum_y = 0.0
+        _fist_scroll_accum_x = 0.0
+        _scroll_active = False
+        return 0, 0
+
+    fist_hand = None
+    for h in hands_list:
+        if _is_fist(h):
+            fist_hand = h
+            break
+    if fist_hand is None:
+        _fist_scroll_prev = None
+        _fist_scroll_accum_y = 0.0
+        _fist_scroll_accum_x = 0.0
+        _scroll_active = False
+        return 0, 0
+
+    _scroll_active = True
+    wrist = fist_hand[0]
+    cur = (float(wrist.y), float(wrist.x))
+    if _fist_scroll_prev is None:
+        _fist_scroll_prev = cur
+        return 0, 0
+    dy = cur[0] - _fist_scroll_prev[0]
+    dx = cur[1] - _fist_scroll_prev[1]
+    _fist_scroll_prev = cur
+
+    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    v_amt = 0
+    h_amt = 0
+    if abs(dy) >= SCROLL_FRAME_DEAD:
+        _fist_scroll_accum_y += -dy * gain
+        if abs(_fist_scroll_accum_y) >= 1.0:
+            v_amt = int(_fist_scroll_accum_y)
+            _fist_scroll_accum_y -= v_amt
+    if abs(dx) >= SCROLL_FRAME_DEAD:
+        _fist_scroll_accum_x += -dx * (gain / 3.0)
+        if abs(_fist_scroll_accum_x) >= 1.0:
+            h_amt = int(_fist_scroll_accum_x)
+            _fist_scroll_accum_x -= h_amt
+    return v_amt, h_amt
+
+
 def _update_two_hand_scroll(hands_list, now: float) -> int:
     """Two hands visible → scroll mode. Returns signed scroll amount
     (positive = up, negative = down, 0 = no scroll this frame).
@@ -3156,12 +3239,23 @@ def _capture_loop() -> None:
         left_x, left_y, right_x, right_y = _split_hands_xy(hands_lm_list)
 
         hands_up_toggle = _update_hands_up(hands_lm_list, now)
-        scroll_amt = _update_two_hand_scroll(hands_lm_list, now)
-        if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
-            try:
-                pyautogui.scroll(scroll_amt, _pause=False)
-            except Exception as e:
-                print(f"[viewer] scroll failed: {e}", flush=True)
+        if _scroll_mode == "fist":
+            v_amt, h_amt = _update_fist_scroll(hands_lm_list, now)
+            if _system_enabled and _scroll_gesture_enabled:
+                try:
+                    if v_amt:
+                        pyautogui.scroll(v_amt, _pause=False)
+                    if h_amt:
+                        pyautogui.hscroll(h_amt, _pause=False)
+                except Exception as e:
+                    print(f"[viewer] fist-scroll failed: {e}", flush=True)
+        elif _scroll_mode == "two_hands":
+            scroll_amt = _update_two_hand_scroll(hands_lm_list, now)
+            if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
+                try:
+                    pyautogui.scroll(scroll_amt, _pause=False)
+                except Exception as e:
+                    print(f"[viewer] scroll failed: {e}", flush=True)
         face_lms = None
         if face_landmarker is not None:
             try:
@@ -3364,7 +3458,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
-        global _wispr_method, _scroll_sens
+        global _wispr_method, _scroll_sens, _scroll_mode
         global _right_click_method, _double_click_on, _cursor_sens
         global _scroll_gesture_enabled, _swipe_gesture_enabled
         if self.path == "/command":
@@ -3463,6 +3557,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "click": _click_method,
                         "wispr": _wispr_method,
                         "scrollSens": _scroll_sens,
+                        "scrollMode": _scroll_mode,
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
                         "cursorSens": round(_cursor_sens, 2),
@@ -3526,6 +3621,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "ok": True,
                         "scrollSens": (_scroll_sens
                                        if _scroll_gesture_enabled else "off"),
+                    }).encode(),
+                )
+                return
+            if action == "scroll_mode":
+                mode = data.get("mode")
+                if mode in ("fist", "two_hands", "off"):
+                    _scroll_mode = mode
+                    _scroll_gesture_enabled = (mode != "off")
+                    print(f"[viewer] scroll mode = {_scroll_mode}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True,
+                        "scrollMode": _scroll_mode,
                     }).encode(),
                 )
                 return
@@ -3727,6 +3836,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "click": _click_method,
                         "wispr": _wispr_method,
                         "scrollSens": _scroll_sens,
+                        "scrollMode": _scroll_mode,
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
                         "cursorSens": round(_cursor_sens, 2),
