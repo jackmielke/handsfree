@@ -2138,16 +2138,20 @@ def _update_swipe(hands_list, now: float) -> Optional[str]:
 
 
 def _is_fist(hand) -> bool:
-    """Closed fist: tips of all 4 fingers curl below their middle joint.
+    """Closed fist: ALL 4 fingers curl below their middle joint.
     Uses landmark y (lower = higher in image). For each finger, tip y
-    should be greater (lower down) than the PIP joint y."""
+    should be greater (lower down) than the PIP joint y.
+
+    Requires all 4 (not 3) so a pointing-index posture (3 curled,
+    index extended) is NOT a fist — otherwise the cursor hand would
+    spuriously trigger scroll.
+    """
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
-    curled = 0
     for t, p in zip(tips, pips):
-        if hand[t].y > hand[p].y + 0.015:
-            curled += 1
-    return curled >= 3
+        if hand[t].y <= hand[p].y + 0.015:
+            return False
+    return True
 
 
 def _fingertips_touching(hands_list) -> Optional[float]:
