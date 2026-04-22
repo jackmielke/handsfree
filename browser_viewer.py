@@ -75,6 +75,178 @@ def _get_whisper():
         print("[viewer] whisper loaded", flush=True)
         return _whisper_model
 
+
+# ---- voice daemon (direct-mic, bypasses browser) -------------------------
+# Background thread that opens the default input device directly (via
+# sounddevice, which uses CoreAudio on macOS), runs a simple energy-gated
+# VAD to detect speech segments, ships each segment through the Whisper
+# model, and dispatches matched commands. Permissions are inherited from
+# whatever process launched browser_viewer.py — in our case the Terminal.
+_voice_enabled: bool = False
+_voice_thread: Optional[threading.Thread] = None
+_voice_stop = threading.Event()
+_voice_state: str = "off"          # off | listening | transcribing | err
+_voice_last_text: str = ""
+_voice_last_result: str = ""
+_voice_err: str = ""
+
+
+def _voice_loop() -> None:
+    """Continuous push-nothing voice loop: listen → segment → transcribe →
+    dispatch. Kept conservative so it can run alongside the camera + models
+    without overwhelming the CPU."""
+    global _voice_state, _voice_last_text, _voice_last_result, _voice_err
+    try:
+        import sounddevice as sd
+    except Exception as e:
+        _voice_err = f"sounddevice import failed: {e}"
+        _voice_state = "err"
+        print(f"[voice] {_voice_err}", flush=True)
+        return
+
+    SR = 16000
+    BLOCK_S = 0.1
+    BLOCK_N = int(SR * BLOCK_S)
+    SPEECH_RMS = 0.012         # tuneable: higher = require louder speech
+    SILENCE_HANG_S = 0.8       # end-of-utterance after this much quiet
+    PRE_ROLL_S = 0.3           # keep this many seconds of pre-speech audio
+    MIN_SEGMENT_S = 0.4
+    MAX_SEGMENT_S = 8.0
+
+    try:
+        stream = sd.InputStream(
+            samplerate=SR, channels=1, dtype="float32",
+            blocksize=BLOCK_N,
+        )
+        stream.start()
+    except Exception as e:
+        _voice_err = f"mic open failed: {e}"
+        _voice_state = "err"
+        print(f"[voice] {_voice_err}", flush=True)
+        return
+
+    # Warm the model early — first transcribe call is otherwise ~5s.
+    try:
+        _get_whisper()
+    except Exception as e:
+        _voice_err = f"whisper load failed: {e}"
+        _voice_state = "err"
+        print(f"[voice] {_voice_err}", flush=True)
+        stream.stop(); stream.close()
+        return
+
+    print("[voice] listening…", flush=True)
+    _voice_state = "listening"
+    _voice_err = ""
+
+    pre_roll: Deque = deque(maxlen=int(PRE_ROLL_S / BLOCK_S))
+    buf: List = []
+    in_speech = False
+    silence_s = 0.0
+    segment_s = 0.0
+
+    try:
+        while not _voice_stop.is_set():
+            try:
+                data, _overflow = stream.read(BLOCK_N)
+            except Exception as e:
+                _voice_err = f"mic read err: {e}"
+                print(f"[voice] {_voice_err}", flush=True)
+                time.sleep(0.1)
+                continue
+
+            # data shape: (BLOCK_N, 1) float32 in [-1, 1]
+            rms = float(np.sqrt(np.mean(data ** 2)))
+            is_speech = rms > SPEECH_RMS
+
+            if is_speech:
+                if not in_speech:
+                    in_speech = True
+                    buf = list(pre_roll)   # include pre-roll
+                    segment_s = len(buf) * BLOCK_S
+                buf.append(data.copy())
+                segment_s += BLOCK_S
+                silence_s = 0.0
+            else:
+                pre_roll.append(data.copy())
+                if in_speech:
+                    buf.append(data.copy())
+                    segment_s += BLOCK_S
+                    silence_s += BLOCK_S
+
+            hit_silence = in_speech and silence_s >= SILENCE_HANG_S
+            hit_max     = in_speech and segment_s >= MAX_SEGMENT_S
+            if hit_silence or hit_max:
+                if segment_s >= MIN_SEGMENT_S and buf:
+                    audio = np.concatenate(
+                        [b[:, 0] for b in buf]
+                    ).astype(np.float32)
+                    _voice_state = "transcribing"
+                    _voice_handle_segment(audio, SR)
+                    _voice_state = "listening"
+                in_speech = False
+                buf = []
+                silence_s = 0.0
+                segment_s = 0.0
+    finally:
+        try:
+            stream.stop(); stream.close()
+        except Exception:
+            pass
+        print("[voice] stopped", flush=True)
+        _voice_state = "off"
+
+
+def _voice_handle_segment(audio_np, sr: int) -> None:
+    """Transcribe one captured utterance and, if it matches a known
+    command, dispatch it."""
+    global _voice_last_text, _voice_last_result
+    try:
+        model = _get_whisper()
+        t0 = time.time()
+        segments, _info = model.transcribe(
+            audio_np, beam_size=1, vad_filter=False,
+            language="en",
+        )
+        text = " ".join(s.text.strip() for s in segments).strip()
+        dt = time.time() - t0
+        print(f"[voice] {dt*1000:.0f}ms → {text!r}", flush=True)
+        if not text:
+            return
+        _voice_last_text = text
+        cmd = _match_command(text)
+        if cmd:
+            result = _dispatch_command(cmd)
+            _voice_last_result = (
+                f"{cmd.get('action')} {cmd.get('target','')}".strip()
+            )
+            print(f"[voice] fired: {result}", flush=True)
+        else:
+            _voice_last_result = "(no match)"
+    except Exception as e:
+        print(f"[voice] transcribe err: {e}", flush=True)
+
+
+def _voice_start() -> None:
+    global _voice_enabled, _voice_thread, _voice_state
+    if _voice_enabled:
+        return
+    _voice_stop.clear()
+    _voice_enabled = True
+    _voice_state = "starting"
+    _voice_thread = threading.Thread(target=_voice_loop, daemon=True)
+    _voice_thread.start()
+
+
+def _voice_stop_fn() -> None:
+    global _voice_enabled, _voice_thread
+    if not _voice_enabled:
+        return
+    _voice_enabled = False
+    _voice_stop.set()
+    _voice_thread = None
+
+
 PORT = 8765
 BOUNDARY = "handsfree-frame"
 HERE = Path(__file__).parent
@@ -475,6 +647,15 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-v="off">off</button>
         <button class="cc-opt" data-v="on">on</button>
       </div>
+    </div>
+    <div class="cc-row">
+      <div class="cc-label">voice daemon</div>
+      <div class="cc-opts" id="cc-voicedaemon-opts">
+        <button class="cc-opt" data-v="off">off</button>
+        <button class="cc-opt" data-v="on">on</button>
+      </div>
+      <div id="cc-voice-status" style="font-size:10px; color:var(--dim);
+           margin-left:10px;">idle</div>
     </div>
     <div class="cc-row">
       <div class="cc-label">swipe pages</div>
@@ -1380,6 +1561,19 @@ HTML = """<!doctype html>
     }).catch(() => {});
   });
 
+  // Voice daemon — direct-mic always-on command listening (Whisper).
+  const ccVoiceDaemon = document.getElementById('cc-voicedaemon-opts');
+  const ccVoiceStatus = document.getElementById('cc-voice-status');
+  ccVoiceDaemon.addEventListener('click', (e) => {
+    const b = e.target.closest('.cc-opt'); if (!b) return;
+    paintActive(ccVoiceDaemon, b.dataset.v);
+    fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'voice_daemon', on: b.dataset.v === 'on' }),
+    }).catch(() => {});
+  });
+
   const ccSwipe = document.getElementById('cc-swipe-opts');
   ccSwipe.addEventListener('click', (e) => {
     const b = e.target.closest('.cc-opt'); if (!b) return;
@@ -1891,6 +2085,16 @@ HTML = """<!doctype html>
       }
       if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
       if ('tabSwipe' in msg) paintActive(ccTabSwipe, msg.tabSwipe ? 'on' : 'off');
+      if ('voiceDaemon' in msg) paintActive(ccVoiceDaemon, msg.voiceDaemon ? 'on' : 'off');
+      if ('voiceState' in msg) {
+        let s = msg.voiceState;
+        if (msg.voiceErr) s = 'err: ' + msg.voiceErr;
+        else if (msg.voiceLastText) {
+          s += ' · last: "' + msg.voiceLastText + '"';
+          if (msg.voiceLastResult) s += ' → ' + msg.voiceLastResult;
+        }
+        ccVoiceStatus.textContent = s;
+      }
       if ('cursorSens' in msg) paintSens(msg.cursorSens);
       if ('systemEnabled' in msg) {
         document.body.classList.toggle('system-off', !msg.systemEnabled);
@@ -4212,6 +4416,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "jam": _jam_mode}).encode(),
                 )
                 return
+            if action == "voice_daemon":
+                want = bool(data.get("on"))
+                if want:
+                    _voice_start()
+                else:
+                    _voice_stop_fn()
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True, "voiceDaemon": _voice_enabled,
+                        "voiceState": _voice_state,
+                    }).encode(),
+                )
+                return
             if action == "cursor_enable":
                 global _cursor_enabled, _cursor_calibrated, _cursor_calib_start
                 global _finger_center, _gaze_center
@@ -4567,6 +4785,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "clapPreset": _clap_preset,
                         "dictGesture": _dict_gesture,
                         "dictMode": _dict_mode,
+                        "voiceDaemon": _voice_enabled,
+                        "voiceState": _voice_state,
+                        "voiceLastText": _voice_last_text,
+                        "voiceLastResult": _voice_last_result,
+                        "voiceErr": _voice_err,
                     }
                     if bob: payload["bob"] = True
                     if blink: payload["blink"] = True
