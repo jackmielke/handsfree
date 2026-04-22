@@ -199,9 +199,23 @@ HTML = """<!doctype html>
     color:var(--dim); }
   #jam-btn.on { background:#b48cff; color:#140a24; border-color:#b48cff; }
   #cc-btn.on  { background:#6ee7b7; color:#05170f; border-color:#6ee7b7; }
-  #cc-panel { display:none; margin-top:10px; padding:14px;
-    background:#0a0a0f; border:1px solid #262634; border-radius:10px; }
-  #cc-panel.open { display:block; }
+  /* Layout: camera at top, control center pinned to bottom.
+     body is a flex column, so we reorder with flex `order` instead of
+     moving DOM (keeps the rest of the JS untouched). */
+  .stage    { order: 1; }
+  #cc-panel { order: 10; width:100%; max-width:1200px;
+    max-height:0; overflow:hidden; opacity:0;
+    margin-top:0; padding:0 14px;
+    background:#0a0a0f; border:1px solid transparent; border-radius:10px;
+    transition: max-height 220ms ease, opacity 140ms ease,
+                margin-top 220ms ease, padding 220ms ease,
+                border-color 140ms ease;
+    /* Skip rendering the panel's subtree when it's offscreen/closed so
+       toggling doesn't force a massive layout pass. */
+    content-visibility: auto; contain-intrinsic-size: 0 600px;
+    will-change: max-height, opacity; }
+  #cc-panel.open { max-height:80vh; overflow-y:auto; opacity:1;
+    margin-top:10px; padding:14px; border-color:#262634; }
   .cc-row { display:flex; align-items:center; gap:10px;
     margin-bottom:10px; flex-wrap:wrap; }
   .cc-row:last-child { margin-bottom:0; }
@@ -1019,6 +1033,9 @@ HTML = """<!doctype html>
     ccBtn.classList.toggle('on', on);
   }
   ccBtn.addEventListener('click', () => setCCOpen(!ccOpen));
+  // Auto-open Control Center on page load so the user can see the
+  // current state and tweak without hunting for a button.
+  setCCOpen(true);
 
   function paintActive(container, value) {
     container.querySelectorAll('.cc-opt').forEach(b => {
@@ -2088,7 +2105,7 @@ _jam_mode: bool = False
 
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
 _pointing_method: str = "finger"  # "head" | "finger" | "gaze"
-_click_method: str = "brow"       # primary (left) click gesture
+_click_method: str = "mouth"      # primary (left) click gesture
 _cursor_sens: float = 0.7         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
 _double_click_on: bool = False    # double-tap primary within DBL window → double-click
@@ -3491,6 +3508,14 @@ def _capture_loop() -> None:
             break
         time.sleep(0.1)
     print(f"[viewer] camera warm: {cam.name}", flush=True)
+
+    # Auto-start cursor calibration on boot so gestures work without the
+    # user having to toggle master off/on first. Cursor defaults to enabled
+    # so this just kicks off the neutral-pose capture countdown.
+    global _cursor_calib_start
+    if _cursor_enabled and _cursor_calib_start is None:
+        _cursor_calib_start = time.time()
+        print("[viewer] auto-calibrating cursor on boot", flush=True)
 
     face_landmarker = None
     if FACE_MODEL_PATH.exists():
