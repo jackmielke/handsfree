@@ -14,6 +14,8 @@ import http.server
 import json
 import math
 import os
+import re
+import tempfile
 import socketserver
 import signal
 import subprocess
@@ -49,6 +51,29 @@ except Exception as _e:  # pragma: no cover
     _QUARTZ_OK = False
 
 from avcamera import Camera
+
+# ---- local speech-to-text (lazy load) -----------------------------------
+# Plan B for voice commands when Web Speech API doesn't work (Arc,
+# offline, etc.). faster-whisper "tiny" runs comfortably on Apple Silicon
+# CPU with int8 quant. ~75MB, downloaded to ~/.cache/huggingface on first
+# use. Loaded only when /transcribe is first hit, so startup stays fast.
+_whisper_model = None
+_whisper_lock = threading.Lock()
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is not None:
+        return _whisper_model
+    with _whisper_lock:
+        if _whisper_model is not None:
+            return _whisper_model
+        print("[viewer] loading whisper (tiny.en, int8)…", flush=True)
+        from faster_whisper import WhisperModel
+        _whisper_model = WhisperModel(
+            "tiny.en", device="cpu", compute_type="int8",
+        )
+        print("[viewer] whisper loaded", flush=True)
+        return _whisper_model
 
 PORT = 8765
 BOUNDARY = "handsfree-frame"
@@ -550,6 +575,22 @@ HTML = """<!doctype html>
     </div>
 
     <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
+      local whisper (works when browser speech doesn't) —
+      hold to record, release to fire
+    </div>
+    <div style="display:flex; gap:6px; margin-bottom:10px;">
+      <button id="vt-ptt" type="button"
+        style="flex:1; padding:10px; background:#1b2530; color:var(--fg);
+        border:1px solid #2a3550; border-radius:6px; font-size:12px;
+        font-weight:700; cursor:pointer; user-select:none;
+        -webkit-user-select:none;">hold to record</button>
+      <button id="vt-rec-toggle" type="button"
+        style="padding:10px 14px; background:#1b2530; color:var(--fg);
+        border:1px solid #2a3550; border-radius:6px; font-size:11px;
+        cursor:pointer;">● rec</button>
+    </div>
+
+    <div style="font-size:10px; color:var(--dim); margin-bottom:4px;">
       live transcript
     </div>
     <div id="vt-transcript"
@@ -762,9 +803,12 @@ HTML = """<!doctype html>
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach(t => t.stop());  // release — SR will reopen
+      window.__lastMicErr = null;
       return true;
     } catch (e) {
       console.warn('mic denied', e);
+      // Stash the real reason so the voice test panel can surface it.
+      window.__lastMicErr = (e && (e.name || e.message)) || 'unknown';
       setVoicePill('err', 'mic denied');
       return false;
     }
@@ -772,21 +816,36 @@ HTML = """<!doctype html>
 
   function createRecognizer() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setVoicePill('err', 'unsupported'); return null; }
+    if (!SR) {
+      setVoicePill('err', 'unsupported');
+      if (window.__vtLog) window.__vtLog('sr', 'SpeechRecognition not available in this browser', '#f87171');
+      return null;
+    }
     const r = new SR();
     r.continuous = true;
     r.interimResults = true;
     r.lang = 'en-US';
-    r.onstart = () => setVoicePill('on', 'listening');
+    r.onstart = () => {
+      setVoicePill('on', 'listening');
+      if (window.__vtLog) window.__vtLog('sr', 'onstart — actually listening', '#6ee7b7');
+    };
+    r.onaudiostart    = () => { if (window.__vtLog) window.__vtLog('sr', 'audiostart',    'var(--dim)'); };
+    r.onsoundstart    = () => { if (window.__vtLog) window.__vtLog('sr', 'soundstart',    'var(--dim)'); };
+    r.onspeechstart   = () => { if (window.__vtLog) window.__vtLog('sr', 'speechstart',   'var(--dim)'); };
+    r.onspeechend     = () => { if (window.__vtLog) window.__vtLog('sr', 'speechend',     'var(--dim)'); };
+    r.onnomatch       = () => { if (window.__vtLog) window.__vtLog('sr', 'nomatch',       '#fbbf24'); };
     r.onerror = (e) => {
-      // Silent retry for transient errors; only show real auth blockers.
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      const err = e && e.error ? e.error : 'unknown';
+      const msg = e && e.message ? ' — ' + e.message : '';
+      if (window.__vtLog) window.__vtLog('sr-err', err + msg, '#f87171');
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
         voiceWanted = false;
         setVoicePill('err', 'mic blocked');
       }
       // network / aborted / no-speech → let onend restart. Do not flicker pill.
     };
     r.onend = () => {
+      if (window.__vtLog) window.__vtLog('sr', 'onend', 'var(--dim)');
       if (voiceWanted) {
         setTimeout(() => { try { r.start(); } catch {} }, 500);
       } else {
@@ -931,6 +990,14 @@ HTML = """<!doctype html>
       while (logEl.children.length > MAX_LOG) logEl.removeChild(logEl.firstChild);
       logEl.scrollTop = logEl.scrollHeight;
     }
+    // Expose so the recognizer (defined outside this IIFE) can log too.
+    window.__vtLog = log;
+
+    // Capability sniff so we know what browser reality we're in.
+    const hasSR = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+    log('env', (navigator.userAgent.match(/Chrome\/[\d.]+|Safari\/[\d.]+|Arc/g) || ['unknown']).join(' '), 'var(--dim)');
+    log('env', 'SpeechRecognition: ' + (hasSR ? 'present' : 'MISSING'),
+        hasSR ? 'var(--dim)' : '#f87171');
 
     // Mic permission detection — best-effort via Permissions API.
     async function refreshMicStatus() {
@@ -951,7 +1018,19 @@ HTML = """<!doctype html>
     reqMicBtn.addEventListener('click', async () => {
       log('mic', 'requesting permission…', 'var(--dim)');
       const ok = await ensureMic();
-      log('mic', ok ? 'granted' : 'denied', ok ? '#6ee7b7' : '#f87171');
+      if (ok) {
+        log('mic', 'granted', '#6ee7b7');
+      } else {
+        const reason = window.__lastMicErr || 'unknown';
+        log('mic', 'denied — ' + reason, '#f87171');
+        if (reason === 'NotAllowedError') {
+          log('fix', 'click the 🛡️/lock icon in Arc URL bar → ' +
+              'set Microphone to Allow → reload this page', '#fbbf24');
+        } else if (reason === 'NotFoundError') {
+          log('fix', 'no mic device found — check macOS Sound settings',
+              '#fbbf24');
+        }
+      }
       refreshMicStatus();
     });
 
@@ -1005,6 +1084,103 @@ HTML = """<!doctype html>
         window.__vtFire(phrase, cmd, 'click');
         if (cmd) sendCommand(cmd);
       });
+    });
+
+    // ---- Local Whisper push-to-talk --------------------------------------
+    // Records audio via MediaRecorder → POSTs to /transcribe → server runs
+    // faster-whisper locally, matches command, fires it, returns text +
+    // result which we render in the log.
+    const pttBtn    = document.getElementById('vt-ptt');
+    const recToggle = document.getElementById('vt-rec-toggle');
+    let mediaRec = null;
+    let mediaStream = null;
+    let recChunks = [];
+    let recording = false;
+
+    function paintRec(on) {
+      recording = on;
+      pttBtn.style.background = on ? '#f87171' : '#1b2530';
+      pttBtn.style.color      = on ? '#1a0707' : 'var(--fg)';
+      pttBtn.textContent      = on ? '● recording…' : 'hold to record';
+      recToggle.textContent   = on ? '■ stop' : '● rec';
+    }
+
+    async function startRec() {
+      if (recording) return;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        log('rec', 'mic denied: ' + (e && e.name), '#f87171');
+        return;
+      }
+      recChunks = [];
+      // webm/opus is the Chromium default and whisper (via ffmpeg/av) groks it.
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+      try {
+        mediaRec = mime ? new MediaRecorder(mediaStream, { mimeType: mime })
+                        : new MediaRecorder(mediaStream);
+      } catch (e) {
+        log('rec', 'recorder err: ' + e.message, '#f87171');
+        mediaStream.getTracks().forEach(t => t.stop());
+        return;
+      }
+      mediaRec.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) recChunks.push(ev.data);
+      };
+      mediaRec.onstop = async () => {
+        mediaStream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(recChunks, {
+          type: mediaRec.mimeType || 'audio/webm',
+        });
+        log('rec', `captured ${(blob.size/1024).toFixed(1)} KB, transcribing…`, 'var(--dim)');
+        try {
+          const res = await fetch('/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type },
+            body: blob,
+          });
+          const j = await res.json();
+          if (!j.ok) {
+            log('whisper', 'error: ' + (j.error || 'unknown'), '#f87171');
+            return;
+          }
+          const heard = j.text || '(silence)';
+          transEl.innerHTML = `<span style="color:var(--fg)">${escapeHtml(heard)}</span>`;
+          log('whisper', `(${j.ms}ms) "${heard}"`, 'var(--fg)');
+          if (j.command) {
+            const c = j.command;
+            log('match', `${c.action} ${c.target || ''}`.trim(), '#6ee7b7');
+          } else {
+            log('match', 'no command', '#fbbf24');
+          }
+          if (j.fired) {
+            log('fired', JSON.stringify(j.fired), j.fired.ok ? '#6ee7b7' : '#f87171');
+          }
+        } catch (e) {
+          log('whisper', 'fetch err: ' + e.message, '#f87171');
+        }
+      };
+      mediaRec.start();
+      paintRec(true);
+    }
+
+    function stopRec() {
+      if (!recording || !mediaRec) return;
+      try { mediaRec.stop(); } catch {}
+      paintRec(false);
+    }
+
+    // Push-to-talk: hold the button. Works with mouse and touch.
+    pttBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); startRec(); });
+    pttBtn.addEventListener('pointerup',   (e) => { e.preventDefault(); stopRec();  });
+    pttBtn.addEventListener('pointerleave',          () => { if (recording) stopRec(); });
+    pttBtn.addEventListener('pointercancel',         () => { if (recording) stopRec(); });
+
+    // Toggle record: click start, click stop. For when holding is awkward.
+    recToggle.addEventListener('click', () => {
+      if (recording) stopRec(); else startRec();
     });
 
     // Sim input — type + fire.
@@ -3831,6 +4007,70 @@ def _open_app(target: str) -> tuple:
         return False, name
 
 
+# Server-side mirror of the JS matchCommand() so /transcribe can go
+# straight from Whisper text → fired action without a second round trip.
+_OPEN_RE  = re.compile(r"\b(?:open|launch)\s+([a-z0-9][a-z0-9 \-\.]{0,30})", re.I)
+_CLOSE_RE = re.compile(r"\b(?:close|quit)\s+([a-z0-9][a-z0-9 \-\.]{0,30})",  re.I)
+_INSTANT = [
+    (re.compile(r"\bscroll\s+down\b", re.I),  ("scroll", "down")),
+    (re.compile(r"\bscroll\s+up\b", re.I),    ("scroll", "up")),
+    (re.compile(r"\bpage\s+down\b", re.I),    ("scroll", "down")),
+    (re.compile(r"\bpage\s+up\b", re.I),      ("scroll", "up")),
+    (re.compile(r"\b(?:click|tap)\b", re.I),  ("click",  "")),
+    (re.compile(r"\bvolume\s+up\b", re.I),    ("volume", "up")),
+    (re.compile(r"\bvolume\s+down\b", re.I),  ("volume", "down")),
+    (re.compile(r"\b(?:mute|silence)\b", re.I), ("volume", "mute")),
+    (re.compile(r"\bnext\s+desktop\b", re.I), ("desktop", "next")),
+    (re.compile(r"\bprevious\s+desktop\b", re.I), ("desktop", "prev")),
+]
+
+def _clean_target(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"^(the|up)\s+", "", s, flags=re.I)
+    s = re.sub(r"\s+(please|now|app|application)$", "", s, flags=re.I)
+    return s.strip()
+
+def _match_command(text: str):
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    for pat, (action, target) in _INSTANT:
+        if pat.search(t):
+            return {"action": action, "target": target}
+    m = _OPEN_RE.search(t)
+    if m:
+        return {"action": "open",  "target": _clean_target(m.group(1))}
+    m = _CLOSE_RE.search(t)
+    if m:
+        return {"action": "close", "target": _clean_target(m.group(1))}
+    return None
+
+def _dispatch_command(cmd: dict) -> dict:
+    """Run a matched command (same switch as /command POST). Returns a
+    small status dict suitable for JSON."""
+    action = (cmd.get("action") or "").lower()
+    target = cmd.get("target") or ""
+    if action == "open" and target:
+        ok, name = _open_app(target)
+        return {"ok": ok, "action": action, "resolved": name}
+    if action == "close" and target:
+        ok, name = _quit_app(target)
+        return {"ok": ok, "action": action, "resolved": name}
+    if action == "scroll":
+        _scroll(target)
+        return {"ok": True, "action": action, "target": target}
+    if action == "click":
+        _click()
+        return {"ok": True, "action": action}
+    if action == "volume":
+        _volume(target)
+        return {"ok": True, "action": action, "target": target}
+    if action == "desktop":
+        _fire_swipe_action("right" if target == "next" else "left")
+        return {"ok": True, "action": action, "target": target}
+    return {"ok": False, "action": action, "error": "unknown action"}
+
+
 def _quit_app(target: str) -> tuple:
     name = _resolve_app(target)
     try:
@@ -3859,6 +4099,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _wispr_method, _scroll_sens, _scroll_mode
         global _right_click_method, _double_click_on, _cursor_sens
         global _scroll_gesture_enabled, _swipe_gesture_enabled
+
+        # Local speech-to-text + command dispatch. Browser POSTs the raw
+        # audio blob (webm/opus from MediaRecorder) here; we transcribe
+        # with faster-whisper, run _match_command, fire if matched.
+        if self.path == "/transcribe":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length <= 0:
+                self._write_status(400, "text/plain", b"empty body")
+                return
+            blob = self.rfile.read(length)
+            suffix = ".webm"
+            ctype = (self.headers.get("Content-Type") or "").lower()
+            if "wav" in ctype:
+                suffix = ".wav"
+            elif "ogg" in ctype:
+                suffix = ".ogg"
+            elif "mp4" in ctype or "m4a" in ctype:
+                suffix = ".m4a"
+            try:
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=suffix, delete=False
+                )
+                tmp.write(blob)
+                tmp.close()
+                model = _get_whisper()
+                t0 = time.time()
+                segments, _info = model.transcribe(
+                    tmp.name, beam_size=1, vad_filter=True,
+                    language="en",
+                )
+                text = " ".join(s.text.strip() for s in segments).strip()
+                dt = time.time() - t0
+                print(f"[viewer] whisper {dt*1000:.0f}ms: {text!r}",
+                      flush=True)
+                cmd = _match_command(text)
+                fired = None
+                if cmd:
+                    fired = _dispatch_command(cmd)
+                resp = {
+                    "ok": True,
+                    "text": text,
+                    "ms": int(dt * 1000),
+                    "command": cmd,
+                    "fired": fired,
+                }
+                self._write_status(
+                    200, "application/json",
+                    json.dumps(resp).encode(),
+                )
+            except Exception as e:
+                print(f"[viewer] transcribe err: {e}", flush=True)
+                self._write_status(
+                    500, "application/json",
+                    json.dumps({"ok": False, "error": str(e)}).encode(),
+                )
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+            return
+
         if self.path == "/command":
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length).decode("utf-8") if length else "{}"
