@@ -197,6 +197,24 @@ def _voice_loop() -> None:
         _voice_state = "off"
 
 
+# Whisper bias prompt: feeding the model a sentence that uses our command
+# vocabulary makes it vastly more likely to pick these words over common-
+# English neighbors. This is how we get a "dictionary" without retraining.
+_VOICE_BIAS_PROMPT = (
+    "Voice commands: open Telegram, open Notion, open Arc, open Slack, "
+    "open Spotify, open Figma, open Safari, open Chrome, open Cursor, "
+    "open Terminal, open Finder, open Messages, open Mail, open Calendar, "
+    "close Telegram, close Notion, close Arc. "
+    "Scroll up, scroll down, page up, page down. "
+    "Click, tap, volume up, volume down, mute. "
+    "Next desktop, previous desktop."
+)
+
+# Rolling buffer of recent utterances so the UI can show what Whisper
+# actually heard, even for phrases that didn't match a command.
+_voice_transcript: Deque = deque(maxlen=12)
+
+
 def _voice_handle_segment(audio_np, sr: int) -> None:
     """Transcribe one captured utterance and, if it matches a known
     command, dispatch it."""
@@ -207,6 +225,7 @@ def _voice_handle_segment(audio_np, sr: int) -> None:
         segments, _info = model.transcribe(
             audio_np, beam_size=1, vad_filter=False,
             language="en",
+            initial_prompt=_VOICE_BIAS_PROMPT,
         )
         text = " ".join(s.text.strip() for s in segments).strip()
         dt = time.time() - t0
@@ -223,6 +242,11 @@ def _voice_handle_segment(audio_np, sr: int) -> None:
             print(f"[voice] fired: {result}", flush=True)
         else:
             _voice_last_result = "(no match)"
+        _voice_transcript.append({
+            "text": text,
+            "result": _voice_last_result,
+            "ts": int(time.time() * 1000),
+        })
     except Exception as e:
         print(f"[voice] transcribe err: {e}", flush=True)
 
@@ -657,6 +681,11 @@ HTML = """<!doctype html>
       <div id="cc-voice-status" style="font-size:10px; color:var(--dim);
            margin-left:10px;">idle</div>
     </div>
+    <div id="cc-voice-log" style="display:none; margin-top:-4px;
+         margin-bottom:10px; background:#05080f; border:1px solid #1a2030;
+         border-radius:6px; padding:8px 10px; font-size:11px;
+         line-height:1.5; font-family:ui-monospace,Menlo,monospace;
+         max-height:160px; overflow-y:auto;"></div>
     <div class="cc-row">
       <div class="cc-label">swipe pages</div>
       <div class="cc-opts" id="cc-swipe-opts">
@@ -2085,15 +2114,28 @@ HTML = """<!doctype html>
       }
       if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
       if ('tabSwipe' in msg) paintActive(ccTabSwipe, msg.tabSwipe ? 'on' : 'off');
-      if ('voiceDaemon' in msg) paintActive(ccVoiceDaemon, msg.voiceDaemon ? 'on' : 'off');
+      if ('voiceDaemon' in msg) {
+        paintActive(ccVoiceDaemon, msg.voiceDaemon ? 'on' : 'off');
+        const logEl = document.getElementById('cc-voice-log');
+        if (logEl) logEl.style.display = msg.voiceDaemon ? 'block' : 'none';
+      }
       if ('voiceState' in msg) {
         let s = msg.voiceState;
         if (msg.voiceErr) s = 'err: ' + msg.voiceErr;
-        else if (msg.voiceLastText) {
-          s += ' · last: "' + msg.voiceLastText + '"';
-          if (msg.voiceLastResult) s += ' → ' + msg.voiceLastResult;
-        }
         ccVoiceStatus.textContent = s;
+      }
+      if ('voiceTranscript' in msg) {
+        const logEl = document.getElementById('cc-voice-log');
+        if (logEl && Array.isArray(msg.voiceTranscript)) {
+          logEl.innerHTML = msg.voiceTranscript.map(u => {
+            const ok = u.result && u.result !== '(no match)';
+            const color = ok ? '#6ee7b7' : 'var(--dim)';
+            return '<div style="color:' + color + '">' +
+                   '“' + (u.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '” ' +
+                   '<span style="color:var(--dim)">→ ' + (u.result || '') + '</span>' +
+                   '</div>';
+          }).reverse().join('');
+        }
       }
       if ('cursorSens' in msg) paintSens(msg.cursorSens);
       if ('systemEnabled' in msg) {
@@ -4107,14 +4149,52 @@ def _capture_loop() -> None:
 # A few common misspellings / homophones. Everything else is passed to
 # `open -a` as-is and macOS fuzzy-matches app names.
 APP_ALIASES = {
-    "ark": "Arc",                  # "arc" often transcribed as "ark"
-    "wispr": "Wispr Flow",
-    "whisper": "Wispr Flow",
-    "wisper": "Wispr Flow",
-    "chat gpt": "ChatGPT",
-    "vs code": "Visual Studio Code",
-    "zoom": "zoom.us",
+    # Arc — Whisper loves homophones
+    "ark":           "Arc",
+    "arc browser":   "Arc",
+    # Telegram
+    "telegrams":     "Telegram",
+    "telegraph":     "Telegram",
+    "tell a gram":   "Telegram",
+    "tell him":      "Telegram",
+    # Notion
+    "notions":       "Notion",
+    "ocean":         "Notion",
+    "motion":        "Notion",
+    "emotion":       "Notion",
+    "lotion":        "Notion",
+    # Figma
+    "figure":        "Figma",
+    "figure ma":     "Figma",
+    "sigma":         "Figma",
+    # Slack
+    "slacks":        "Slack",
+    # Spotify
+    "spotty":        "Spotify",
+    "spot ify":      "Spotify",
+    # Cursor (editor)
+    "cursor":        "Cursor",
+    # Wispr
+    "wispr":         "Wispr Flow",
+    "whisper":       "Wispr Flow",
+    "wisper":        "Wispr Flow",
+    "whisper flow":  "Wispr Flow",
+    # Misc
+    "chat gpt":      "ChatGPT",
+    "chatgpt":       "ChatGPT",
+    "vs code":       "Visual Studio Code",
+    "vscode":        "Visual Studio Code",
+    "zoom":          "zoom.us",
 }
+
+# Canonical app names we try to fuzzy-match raw targets against when the
+# alias table misses. Kept lowercase; _resolve_app compares prefixes and
+# substrings. Small-edit-distance matches are preferred.
+_KNOWN_APPS = [
+    "Telegram", "Notion", "Arc", "Slack", "Spotify", "Figma", "Safari",
+    "Chrome", "Cursor", "Terminal", "Finder", "Messages", "Mail",
+    "Calendar", "ChatGPT", "Visual Studio Code", "Wispr Flow",
+]
 
 
 def _scroll(direction: str) -> None:
@@ -4196,8 +4276,34 @@ def _volume(direction: str) -> None:
 
 
 def _resolve_app(target: str) -> str:
-    t = target.strip().lower()
-    return APP_ALIASES.get(t, target.strip())
+    """Turn a noisy spoken-ish target into a real app name, in 3 tiers:
+    1. Exact alias match against APP_ALIASES (handles mishearings).
+    2. Fuzzy substring / edit-distance match against _KNOWN_APPS.
+    3. Fall through to the raw target; macOS `open -a` will fuzzy-match
+       installed apps in /Applications on its own."""
+    raw = (target or "").strip()
+    if not raw:
+        return raw
+    t = raw.lower()
+    if t in APP_ALIASES:
+        return APP_ALIASES[t]
+    # Substring hit on a known app (e.g. "tele" → Telegram).
+    for name in _KNOWN_APPS:
+        if t == name.lower() or t in name.lower() or name.lower() in t:
+            return name
+    # Small-edit-distance fallback using difflib (no extra deps).
+    try:
+        import difflib
+        cand = difflib.get_close_matches(
+            t, [n.lower() for n in _KNOWN_APPS], n=1, cutoff=0.75,
+        )
+        if cand:
+            for name in _KNOWN_APPS:
+                if name.lower() == cand[0]:
+                    return name
+    except Exception:
+        pass
+    return raw
 
 
 def _open_app(target: str) -> tuple:
@@ -4790,6 +4896,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "voiceLastText": _voice_last_text,
                         "voiceLastResult": _voice_last_result,
                         "voiceErr": _voice_err,
+                        "voiceTranscript": list(_voice_transcript),
                     }
                     if bob: payload["bob"] = True
                     if blink: payload["blink"] = True
