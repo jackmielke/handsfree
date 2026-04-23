@@ -545,12 +545,6 @@ HTML = """<!doctype html>
     <button id="cc-btn"  type="button">control center</button>
     <button id="vt-btn"  type="button">voice test</button>
     <button id="jam-btn" type="button">jam mode</button>
-    <button id="reset-btn" type="button"
-      title="Soft reset: rearms click detectors and recalibrates cursor. Quick fix when mouth click or hand cursor get stuck."
-      style="cursor:pointer; font-size:10px; letter-spacing:0.16em;
-      text-transform:uppercase; font-weight:700; padding:6px 14px;
-      border-radius:999px; border:1px solid #b48cff; background:#15151c;
-      color:#b48cff;">↻ reset</button>
     <button id="master-btn" type="button" title="Master on/off. Double-clap also toggles."
       style="font-size:11px; letter-spacing:0.18em; font-weight:800;
              padding:8px 18px; border-radius:999px; border:1px solid;">
@@ -1155,37 +1149,6 @@ HTML = """<!doctype html>
   jamBtn.addEventListener('click', () => {
     unlockAudio();
     setJamMode(!jamMode);
-  });
-
-  // Soft reset — the "turn it off and on again" button. Rearms click
-  // detectors and kicks a fresh cursor calibration without process
-  // restart. Flashes green on success so the user gets feedback.
-  const resetBtn = document.getElementById('reset-btn');
-  resetBtn.addEventListener('click', async () => {
-    const orig = resetBtn.textContent;
-    resetBtn.textContent = '… resetting';
-    try {
-      const r = await fetch('/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'soft_reset' }),
-      });
-      const j = await r.json();
-      if (j.ok) {
-        resetBtn.style.background = '#6ee7b7';
-        resetBtn.style.color = '#05170f';
-        resetBtn.textContent = '✓ reset — hold pose';
-        setTimeout(() => {
-          resetBtn.textContent = orig;
-          resetBtn.style.background = '#15151c';
-          resetBtn.style.color = '#b48cff';
-        }, 1800);
-      } else {
-        resetBtn.textContent = 'err';
-      }
-    } catch (e) {
-      resetBtn.textContent = 'err';
-    }
   });
 
   // Voice Test panel: dedicated UI for verifying "open telegram" etc.
@@ -4446,12 +4409,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _wispr_method, _scroll_sens, _scroll_mode
         global _right_click_method, _double_click_on, _cursor_sens
         global _scroll_gesture_enabled, _swipe_gesture_enabled
-        # Used by the soft_reset action below.
-        global _cursor_calibrated, _cursor_calib_start
-        global _finger_center, _gaze_center
-        global _blink_armed, _wink_armed, _right_wink_armed
-        global _blink_click_armed, _mouth_armed, _smile_click_armed
-        global _pucker_click_armed, _furrow_click_armed, _pinch_was_closed
 
         # Local speech-to-text + command dispatch. Browser POSTs the raw
         # audio blob (webm/opus from MediaRecorder) here; we transcribe
@@ -4565,31 +4522,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "jam": _jam_mode}).encode(),
                 )
                 return
-            if action == "soft_reset":
-                # The "turn the app off and on again" button. Rearms
-                # every click detector, kicks off fresh cursor calibration,
-                # clears latched scroll/dict state — without dropping the
-                # camera, Whisper model, or any live settings.
-                _cursor_calibrated = False
-                _cursor_calib_start = time.time()
-                _finger_center = None
-                _gaze_center = None
-                _blink_armed = True
-                _wink_armed = True
-                _right_wink_armed = True
-                _blink_click_armed = True
-                _mouth_armed = True
-                _smile_click_armed = True
-                _pucker_click_armed = True
-                _furrow_click_armed = True
-                _pinch_was_closed = False
-                print("[viewer] soft reset — rearmed clicks + recalibrating",
-                      flush=True)
-                self._write_status(
-                    200, "application/json",
-                    json.dumps({"ok": True}).encode(),
-                )
-                return
             if action == "voice_daemon":
                 want = bool(data.get("on"))
                 if want:
@@ -4605,7 +4537,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
                 return
             if action == "cursor_enable":
-                global _cursor_enabled
+                global _cursor_enabled, _cursor_calibrated, _cursor_calib_start
+                global _finger_center, _gaze_center
                 want = bool(data.get("on"))
                 _cursor_enabled = want
                 if want:
