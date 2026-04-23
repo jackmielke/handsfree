@@ -420,6 +420,57 @@ HTML = """<!doctype html>
     color:var(--dim); }
   #jam-btn.on { background:#b48cff; color:#140a24; border-color:#b48cff; }
   #cc-btn.on  { background:#6ee7b7; color:#05170f; border-color:#6ee7b7; }
+
+  /* ---- DJ Board (visible only in jam mode) ---- */
+  #dj-board { order: 5; width:100%; max-width:1200px; display:none;
+    margin-top:10px; padding:12px;
+    background:linear-gradient(180deg, #150826 0%, #0a0a12 100%);
+    border:1px solid #b48cff; border-radius:14px;
+    box-shadow: 0 0 32px rgba(180,140,255,0.2); gap:10px; }
+  body.jam #dj-board { display:flex; flex-wrap:wrap; }
+  .dj-chan { flex:1 1 140px; min-width:0; background:#0a0a12;
+    border:1px solid #2a2a38; border-radius:10px; padding:10px;
+    display:flex; flex-direction:column; gap:8px;
+    transition: border-color 160ms, box-shadow 160ms; }
+  .dj-chan.on { border-color:#b48cff;
+    box-shadow: 0 0 14px rgba(180,140,255,0.25); }
+  .dj-chan.off { opacity: 0.55; }
+  .dj-head { display:flex; justify-content:space-between; align-items:center;
+    font-size:10px; letter-spacing:0.18em; text-transform:uppercase;
+    color:var(--dim); font-weight:700; }
+  .dj-chan.on .dj-head { color:#e5d8ff; }
+  .dj-icon { font-size:14px; }
+  .dj-toggle { cursor:pointer; background:#15151c; color:var(--dim);
+    border:1px solid #2a2a38; border-radius:999px;
+    font-size:10px; letter-spacing:0.16em; text-transform:uppercase;
+    font-weight:700; padding:5px 0; text-align:center;
+    transition: background 120ms, box-shadow 160ms; }
+  .dj-toggle.on { background:#b48cff; color:#140a24; border-color:#b48cff;
+    box-shadow: 0 0 12px rgba(180,140,255,0.55); }
+  .dj-preset { background:#0f0f16; color:var(--ink);
+    border:1px solid #262634; border-radius:6px;
+    padding:5px 8px; font-size:11px; font-family:inherit; cursor:pointer; }
+  .dj-preset:focus { outline:1px solid #b48cff; }
+  .dj-meter { height:6px; background:#1a1a24; border-radius:4px;
+    overflow:hidden; position:relative; }
+  .dj-meter-fill { position:absolute; left:0; top:0; bottom:0; width:0%;
+    background:linear-gradient(90deg, #6ee7b7, #fbbf24, #f87171);
+    transition: width 70ms linear; }
+  .dj-chan.off .dj-meter-fill { background:#2a2a38; }
+  .dj-master { flex:0 0 120px; display:flex; flex-direction:column; gap:8px;
+    padding:10px; background:#0a0a12; border:1px solid #b48cff;
+    border-radius:10px; }
+  .dj-vol { -webkit-appearance:none; appearance:none;
+    width:100%; height:4px; background:#262634; border-radius:2px;
+    outline:none; margin:4px 0; }
+  .dj-vol::-webkit-slider-thumb { -webkit-appearance:none; appearance:none;
+    width:14px; height:14px; border-radius:50%; background:#b48cff;
+    cursor:pointer; box-shadow:0 0 10px rgba(180,140,255,0.75); }
+  .dj-bpm { font-size:22px; font-weight:800; color:#b48cff;
+    text-align:center; font-variant-numeric: tabular-nums;
+    line-height:1; margin-top:2px; }
+  .dj-bpm-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase;
+    color:var(--dim); text-align:center; }
   /* Layout: camera at top, control center pinned to bottom.
      body is a flex column, so we reorder with flex `order` instead of
      moving DOM (keeps the rest of the JS untouched). */
@@ -551,6 +602,58 @@ HTML = """<!doctype html>
       ON
     </button>
   </div>
+  <!-- DJ Board: visible only in jam mode, above the Control Center. -->
+  <div id="dj-board">
+    <div class="dj-chan on" data-k="left">
+      <div class="dj-head"><span>left hand</span><span class="dj-icon">✋</span></div>
+      <div class="dj-toggle on" data-k="left">ON</div>
+      <select class="dj-preset" data-k="left">
+        <option value="warm">warm bass</option>
+        <option value="sub">sub bass</option>
+        <option value="acid">acid</option>
+      </select>
+      <div class="dj-meter"><div class="dj-meter-fill" data-k="left"></div></div>
+    </div>
+    <div class="dj-chan on" data-k="right">
+      <div class="dj-head"><span>right hand</span><span class="dj-icon">🤚</span></div>
+      <div class="dj-toggle on" data-k="right">ON</div>
+      <select class="dj-preset" data-k="right">
+        <option value="dreamy">dreamy lead</option>
+        <option value="pluck">pluck</option>
+        <option value="stab">chord stab</option>
+      </select>
+      <div class="dj-meter"><div class="dj-meter-fill" data-k="right"></div></div>
+    </div>
+    <div class="dj-chan on" data-k="smile">
+      <div class="dj-head"><span>smile</span><span class="dj-icon">😊</span></div>
+      <div class="dj-toggle on" data-k="smile">ON</div>
+      <select class="dj-preset" data-k="smile">
+        <option value="warm">warm pad</option>
+        <option value="bright">bright pad</option>
+        <option value="drone">drone</option>
+      </select>
+      <div class="dj-meter"><div class="dj-meter-fill" data-k="smile"></div></div>
+    </div>
+    <div class="dj-chan on" data-k="head">
+      <div class="dj-head"><span>head bob</span><span class="dj-icon">🥁</span></div>
+      <div class="dj-toggle on" data-k="head">ON</div>
+      <select class="dj-preset" data-k="head">
+        <option value="house">house kit</option>
+        <option value="tight">tight kit</option>
+        <option value="808">808</option>
+      </select>
+      <div class="dj-meter"><div class="dj-meter-fill" data-k="head"></div></div>
+    </div>
+    <div class="dj-master">
+      <div class="dj-head"><span>master</span><span class="dj-icon">🎛️</span></div>
+      <input id="dj-vol" type="range" class="dj-vol" min="0" max="100" value="75">
+      <div>
+        <div class="dj-bpm" id="dj-bpm">—</div>
+        <div class="dj-bpm-label">bpm</div>
+      </div>
+    </div>
+  </div>
+
   <div id="cc-panel">
 <!-- cursor on/off is now the big master toggle in the top bar -->
     <div class="cc-row">
@@ -1151,6 +1254,81 @@ HTML = """<!doctype html>
     setJamMode(!jamMode);
   });
 
+  // ---------- DJ Board wiring ----------
+  function djSetMeter(k, v) {
+    const el = document.querySelector('.dj-meter-fill[data-k="'+k+'"]');
+    if (!el) return;
+    el.style.width = Math.round(Math.max(0, Math.min(1, v)) * 100) + '%';
+  }
+  let _djFlashT = {};
+  function djFlashMeter(k) {
+    const el = document.querySelector('.dj-meter-fill[data-k="'+k+'"]');
+    if (!el) return;
+    el.style.width = '100%';
+    clearTimeout(_djFlashT[k]);
+    _djFlashT[k] = setTimeout(() => { el.style.width = '0%'; }, 140);
+  }
+  function djTrackBPM() {
+    const now = performance.now();
+    bobTimes.push(now);
+    while (bobTimes.length > 8) bobTimes.shift();
+    if (bobTimes.length >= 3) {
+      const intervals = [];
+      for (let i = 1; i < bobTimes.length; i++) intervals.push(bobTimes[i] - bobTimes[i-1]);
+      intervals.sort((a,b) => a - b);
+      const med = intervals[Math.floor(intervals.length / 2)];
+      if (med > 120 && med < 2000) {
+        bobBPM = Math.round(60000 / med);
+        const el = document.getElementById('dj-bpm');
+        if (el) el.textContent = String(bobBPM);
+      }
+    }
+  }
+  // drop stale bpm after 4s of no bobs
+  setInterval(() => {
+    if (bobTimes.length && performance.now() - bobTimes[bobTimes.length-1] > 4000) {
+      bobTimes.length = 0;
+      bobBPM = 0;
+      const el = document.getElementById('dj-bpm');
+      if (el) el.textContent = '—';
+    }
+  }, 1000);
+  document.querySelectorAll('.dj-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const k = btn.dataset.k;
+      djEnabled[k] = !djEnabled[k];
+      btn.classList.toggle('on', djEnabled[k]);
+      btn.textContent = djEnabled[k] ? 'ON' : 'OFF';
+      const chan = btn.closest('.dj-chan');
+      if (chan) chan.classList.toggle('on', djEnabled[k]) && chan.classList.toggle('off', !djEnabled[k]);
+      if (chan) { chan.classList.toggle('off', !djEnabled[k]); chan.classList.toggle('on', djEnabled[k]); }
+      // Silence immediately when turned off
+      if (!djEnabled[k]) {
+        if (k === 'left'  && jamBass) jamBass.setXY(null, null);
+        if (k === 'right' && jamLead) jamLead.setXY(null, null);
+        if (k === 'smile' && pad) pad.setAmount(0);
+      }
+    });
+  });
+  document.querySelectorAll('.dj-preset').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const k = sel.dataset.k;
+      const v = sel.value;
+      djPreset[k] = v;
+      if (k === 'left'  && jamBass && jamBass.setPreset) jamBass.setPreset(v);
+      if (k === 'right' && jamLead && jamLead.setPreset) jamLead.setPreset(v);
+      if (k === 'smile' && pad && pad.setPreset) pad.setPreset(v);
+      if (k === 'head'  && drums && drums.setPreset) drums.setPreset(v);
+    });
+  });
+  const djVol = document.getElementById('dj-vol');
+  if (djVol) {
+    djVol.addEventListener('input', () => {
+      const v = Number(djVol.value) / 100;
+      if (masterGain) masterGain.gain.value = v;
+    });
+  }
+
   // Voice Test panel: dedicated UI for verifying "open telegram" etc.
   (function initVoiceTest() {
     const btn       = document.getElementById('vt-btn');
@@ -1636,6 +1814,14 @@ HTML = """<!doctype html>
   let jamBass = null, jamLead = null;
   let jamMode = false;
   let audioReady = false;
+  let masterGain = null;
+
+  // DJ Board state — which channels are live when jam mode is on
+  const djEnabled = { left: true, right: true, smile: true, head: true };
+  const djPreset  = { left: 'warm', right: 'dreamy', smile: 'warm', head: 'house' };
+  // BPM tracker for head bob
+  const bobTimes = [];
+  let bobBPM = 0;
 
   function noiseBuffer(ctx, seconds = 2) {
     const buf = ctx.createBuffer(1, seconds * ctx.sampleRate, ctx.sampleRate);
@@ -1647,9 +1833,11 @@ HTML = """<!doctype html>
   // BobDrums: one kick/snare (alternating) + hat on each call to hit().
   // No scheduler — the rhythm *is* your head bobbing.
   class BobDrums {
-    constructor(ctx) {
+    constructor(ctx, out) {
       this.ctx = ctx;
       this.count = 0;
+      this.enabled = true;
+      this.preset = 'house';
 
       this.filter = ctx.createBiquadFilter();
       this.filter.type = 'lowpass';
@@ -1658,9 +1846,17 @@ HTML = """<!doctype html>
 
       this.master = ctx.createGain();
       this.master.gain.value = 0.8;
-      this.filter.connect(this.master).connect(ctx.destination);
+      this.filter.connect(this.master).connect(out || ctx.destination);
 
       this.noiseBuf = noiseBuffer(ctx, 1);
+    }
+
+    setPreset(name) {
+      this.preset = name;
+      // Tweak the shared filter to reshape the kit.
+      if (name === 'tight') { this.filter.frequency.value = 4200; }
+      else if (name === '808') { this.filter.frequency.value = 1600; }
+      else { this.filter.frequency.value = 2800; } // house (default)
     }
 
     hit() {
@@ -1674,13 +1870,20 @@ HTML = """<!doctype html>
     _kick(t) {
       const osc = this.ctx.createOscillator();
       const env = this.ctx.createGain();
-      osc.frequency.setValueAtTime(140, t);
-      osc.frequency.exponentialRampToValueAtTime(40, t + 0.12);
+      // Preset reshapes the kick envelope + pitch sweep.
+      let startF = 140, endF = 40, decay = 0.28, stop = 0.32;
+      if (this.preset === 'tight') {
+        startF = 170; endF = 60; decay = 0.15; stop = 0.18;
+      } else if (this.preset === '808') {
+        startF = 110; endF = 32; decay = 0.55; stop = 0.65;
+      }
+      osc.frequency.setValueAtTime(startF, t);
+      osc.frequency.exponentialRampToValueAtTime(endF, t + 0.12);
       env.gain.setValueAtTime(0.0001, t);
       env.gain.exponentialRampToValueAtTime(0.9, t + 0.003);
-      env.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+      env.gain.exponentialRampToValueAtTime(0.001, t + decay);
       osc.connect(env).connect(this.filter);
-      osc.start(t); osc.stop(t + 0.32);
+      osc.start(t); osc.stop(t + stop);
     }
 
     _snare(t) {
@@ -1743,7 +1946,7 @@ HTML = """<!doctype html>
 
   // Theremin: continuous pitched tone gated on hand being raised.
   class Theremin {
-    constructor(ctx, notes, opts) {
+    constructor(ctx, notes, opts, out) {
       opts = opts || {};
       this.ctx = ctx;
       this.notes = notes;
@@ -1755,7 +1958,7 @@ HTML = """<!doctype html>
       this.lpf.frequency.value = opts.lpfHz != null ? opts.lpfHz : 2600;
 
       this.gain = ctx.createGain(); this.gain.gain.value = 0;
-      this.lpf.connect(this.gain).connect(ctx.destination);
+      this.lpf.connect(this.gain).connect(out || ctx.destination);
 
       this.osc = ctx.createOscillator();
       this.osc.type = this.oscType;
@@ -1801,12 +2004,15 @@ HTML = """<!doctype html>
   ];
 
   class WarmPad {
-    constructor(ctx) {
+    constructor(ctx, out) {
       this.ctx = ctx;
+      this.enabled = true;
+      this.preset = 'warm';
       // C major 7 (ish): C3, E3, G3, B3 — spacious, Rhodes-y
       const freqs = [130.81, 164.81, 196.00, 246.94];
-      const lpf = ctx.createBiquadFilter();
-      lpf.type = 'lowpass'; lpf.frequency.value = 1600; lpf.Q.value = 0.6;
+      this.lpf = ctx.createBiquadFilter();
+      this.lpf.type = 'lowpass'; this.lpf.frequency.value = 1600;
+      this.lpf.Q.value = 0.6;
 
       const reverbDelay = ctx.createDelay();
       reverbDelay.delayTime.value = 0.11;
@@ -1816,28 +2022,52 @@ HTML = """<!doctype html>
       this.gain = ctx.createGain();
       this.gain.gain.value = 0;
 
-      lpf.connect(this.gain);
-      lpf.connect(reverbDelay);
+      this.lpf.connect(this.gain);
+      this.lpf.connect(reverbDelay);
       reverbDelay.connect(this.gain);
-      this.gain.connect(ctx.destination);
+      this.gain.connect(out || ctx.destination);
 
       this.oscs = [];
-      freqs.forEach(f => {
+      // Warm preset = full C-maj7; drone preset uses only the root so we can
+      // mute/unmute per preset via per-osc gain taps.
+      this.oscGains = [];
+      freqs.forEach((f, fi) => {
         for (const d of [-6, 6]) {
           const o = ctx.createOscillator();
           o.type = 'triangle';
           o.frequency.value = f;
           o.detune.value = d;
-          o.connect(lpf);
+          const og = ctx.createGain(); og.gain.value = 1;
+          o.connect(og).connect(this.lpf);
           o.start();
-          this.oscs.push(o);
+          this.oscs.push({ osc: o, gain: og, rootIdx: fi });
         }
       });
     }
     setAmount(v) {
       // v in [0,1]; target peak gain ~0.22
-      const g = Math.max(0, Math.min(1, v)) * 0.22;
+      const g = Math.max(0, Math.min(1, v)) * (this.preset === 'drone' ? 0.3 : 0.22);
       this.gain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.18);
+    }
+    setPreset(name) {
+      this.preset = name;
+      const now = this.ctx.currentTime;
+      if (name === 'bright') {
+        this.lpf.frequency.setTargetAtTime(3200, now, 0.2);
+        this.lpf.Q.setTargetAtTime(1.2, now, 0.2);
+        this.oscs.forEach(o => o.gain.gain.setTargetAtTime(1, now, 0.2));
+      } else if (name === 'drone') {
+        // Only the root C3 pair plays; the rest mute.
+        this.lpf.frequency.setTargetAtTime(900, now, 0.2);
+        this.lpf.Q.setTargetAtTime(0.8, now, 0.2);
+        this.oscs.forEach(o => {
+          o.gain.gain.setTargetAtTime(o.rootIdx === 0 ? 1 : 0, now, 0.2);
+        });
+      } else { // warm (default)
+        this.lpf.frequency.setTargetAtTime(1600, now, 0.2);
+        this.lpf.Q.setTargetAtTime(0.6, now, 0.2);
+        this.oscs.forEach(o => o.gain.gain.setTargetAtTime(1, now, 0.2));
+      }
     }
   }
 
@@ -1855,9 +2085,14 @@ HTML = """<!doctype html>
   // Left hand = warm sawtooth bass through a resonant lowpass.
   // Y → pitch (up = higher). X → filter cutoff (left = muted, right = open).
   class JamBass {
-    constructor(ctx) {
+    constructor(ctx, out) {
       this.ctx = ctx;
       this.notes = JAM_BASS_NOTES;
+      this.enabled = true;
+      this.preset = 'warm';
+      this.baseLpfQ = 4.5;
+      this.baseLpfFloor = 250;
+      this.baseLpfCeil = 2500;
 
       this.lpf = ctx.createBiquadFilter();
       this.lpf.type = 'lowpass';
@@ -1886,7 +2121,7 @@ HTML = """<!doctype html>
 
       this.osc.connect(this.lpf);
       this.sub.connect(subGain).connect(this.lpf);
-      this.lpf.connect(this.drive).connect(this.gain).connect(ctx.destination);
+      this.lpf.connect(this.drive).connect(this.gain).connect(out || ctx.destination);
       this.osc.start(); this.sub.start();
     }
     setXY(x, y) {
@@ -1900,20 +2135,34 @@ HTML = """<!doctype html>
       const f = this.notes[idx];
       this.osc.frequency.setTargetAtTime(f, now, 0.06);
       this.sub.frequency.setTargetAtTime(f / 2, now, 0.06);
-      // X: left edge = 250Hz, right edge = 2500Hz (exponential feel)
       const xc = Math.max(0, Math.min(1, x));
-      const cutoff = 250 * Math.pow(10, xc * 1.0);
+      // baseLpfFloor + (ceil - floor) via exp mapping
+      const cutoff = this.baseLpfFloor *
+        Math.pow(this.baseLpfCeil / this.baseLpfFloor, xc);
       this.lpf.frequency.setTargetAtTime(cutoff, now, 0.06);
+      this.lpf.Q.setTargetAtTime(this.baseLpfQ, now, 0.06);
       this.gain.gain.setTargetAtTime(0.18, now, 0.12);
+    }
+    setPreset(name) {
+      this.preset = name;
+      if (name === 'sub') {
+        this.baseLpfQ = 1.2; this.baseLpfFloor = 80; this.baseLpfCeil = 600;
+      } else if (name === 'acid') {
+        this.baseLpfQ = 12; this.baseLpfFloor = 180; this.baseLpfCeil = 4500;
+      } else { // warm (default)
+        this.baseLpfQ = 4.5; this.baseLpfFloor = 250; this.baseLpfCeil = 2500;
+      }
     }
   }
 
   // Right hand = phased sawtooth pad through 4-stage allpass phaser + delay.
   // Y → note in A-minor pent. X → phaser LFO rate + wet mix.
   class JamLead {
-    constructor(ctx) {
+    constructor(ctx, out) {
       this.ctx = ctx;
       this.notes = JAM_LEAD_NOTES;
+      this.enabled = true;
+      this.preset = 'dreamy';
 
       // source: sawtooth + detuned copy for thickness
       this.osc = ctx.createOscillator();
@@ -1974,14 +2223,16 @@ HTML = """<!doctype html>
       this.wetGain.connect(this.gain);
       this.wetGain.connect(delay);
       delay.connect(wetRev).connect(this.gain);
-      this.gain.connect(ctx.destination);
+      this.gain.connect(out || ctx.destination);
 
       this.osc.start(); this.osc2.start();
+      this._prevY = null;  // for pluck/stab edge detection
     }
     setXY(x, y) {
       const now = this.ctx.currentTime;
       if (x == null || y == null) {
         this.gain.gain.setTargetAtTime(0, now, 0.2);
+        this._prevY = null;
         return;
       }
       const t = 1.0 - Math.max(0, Math.min(1, y / 0.55));
@@ -1989,29 +2240,62 @@ HTML = """<!doctype html>
       const f = this.notes[idx];
       this.osc.frequency.setTargetAtTime(f, now, 0.05);
       this.osc2.frequency.setTargetAtTime(f, now, 0.05);
-      // X: left = slow dreamy phaser, right = fast swirling + more wet
       const xc = Math.max(0, Math.min(1, x));
       const rate = 0.15 + xc * 3.5;
       this.lfo.frequency.setTargetAtTime(rate, now, 0.1);
       this.wetGain.gain.setTargetAtTime(0.2 + xc * 0.7, now, 0.1);
       this.dryGain.gain.setTargetAtTime(0.7 - xc * 0.4, now, 0.1);
-      this.gain.gain.setTargetAtTime(0.13, now, 0.12);
+
+      if (this.preset === 'pluck') {
+        // Envelope retriggers when hand "jumps" to a new note (idx change).
+        // Keeps a short decay so it reads as a pluck.
+        const noteChanged = (this._prevIdx !== undefined && this._prevIdx !== idx);
+        if (this._prevY == null || noteChanged) {
+          this.gain.gain.cancelScheduledValues(now);
+          this.gain.gain.setValueAtTime(0.001, now);
+          this.gain.gain.exponentialRampToValueAtTime(0.22, now + 0.006);
+          this.gain.gain.exponentialRampToValueAtTime(0.02, now + 0.35);
+        }
+        this._prevIdx = idx;
+      } else if (this.preset === 'stab') {
+        // Fire a quick chord when first raised; hold while held.
+        if (this._prevY == null) {
+          this.gain.gain.cancelScheduledValues(now);
+          this.gain.gain.setValueAtTime(0.001, now);
+          this.gain.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
+          this.gain.gain.exponentialRampToValueAtTime(0.07, now + 0.25);
+        } else {
+          this.gain.gain.setTargetAtTime(0.07, now, 0.15);
+        }
+      } else {
+        // dreamy (default): continuous sustained tone
+        this.gain.gain.setTargetAtTime(0.13, now, 0.12);
+      }
+      this._prevY = y;
+    }
+    setPreset(name) {
+      this.preset = name;
+      this._prevY = null;
+      this._prevIdx = undefined;
     }
   }
 
   function unlockAudio() {
     if (audioReady) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    drums = new BobDrums(ctx);
-    pad = new WarmPad(ctx);
+    masterGain = ctx.createGain();
+    masterGain.gain.value = 0.9;
+    masterGain.connect(ctx.destination);
+    drums = new BobDrums(ctx, masterGain);
+    pad = new WarmPad(ctx, masterGain);
     leftTh  = new Theremin(ctx, BASS_NOTES, {
       gainLevel: 0.14, oscType: 'triangle', octaveMix: 0.10, lpfHz: 1800,
-    });
+    }, masterGain);
     rightTh = new Theremin(ctx, LEAD_NOTES, {
       gainLevel: 0.10, oscType: 'sine',     octaveMix: 0.20, lpfHz: 3200,
-    });
-    jamBass = new JamBass(ctx);
-    jamLead = new JamLead(ctx);
+    }, masterGain);
+    jamBass = new JamBass(ctx, masterGain);
+    jamLead = new JamLead(ctx, masterGain);
     audioReady = true;
     statusEl.textContent = 'audio ready';
     statusEl.className = 'status on';
@@ -2055,12 +2339,16 @@ HTML = """<!doctype html>
 
       if (typeof msg.smile === 'number') {
         smileFill.style.width = Math.round(msg.smile * 100) + '%';
-        if (pad) pad.setAmount(msg.smile);
+        djSetMeter('smile', msg.smile);
+        if (pad && (!jamMode || djEnabled.smile)) pad.setAmount(msg.smile);
+        else if (pad && jamMode && !djEnabled.smile) pad.setAmount(0);
       }
       if ('leftHandY' in msg) {
         leftFill.style.width = handBarPct(msg.leftHandY) + '%';
+        djSetMeter('left', Math.max(0, Math.min(1, 1 - msg.leftHandY / 0.55)));
         if (jamMode) {
-          if (jamBass) jamBass.setXY(msg.leftHandX, msg.leftHandY);
+          if (jamBass && djEnabled.left) jamBass.setXY(msg.leftHandX, msg.leftHandY);
+          else if (jamBass) jamBass.setXY(null, null);
           if (leftTh) leftTh.setHandY(null);
         } else {
           if (leftTh) leftTh.setHandY(msg.leftHandY);
@@ -2069,8 +2357,10 @@ HTML = """<!doctype html>
       }
       if ('rightHandY' in msg) {
         rightFill.style.width = handBarPct(msg.rightHandY) + '%';
+        djSetMeter('right', Math.max(0, Math.min(1, 1 - msg.rightHandY / 0.55)));
         if (jamMode) {
-          if (jamLead) jamLead.setXY(msg.rightHandX, msg.rightHandY);
+          if (jamLead && djEnabled.right) jamLead.setXY(msg.rightHandX, msg.rightHandY);
+          else if (jamLead) jamLead.setXY(null, null);
           if (rightTh) rightTh.setHandY(null);
         } else {
           if (rightTh) rightTh.setHandY(msg.rightHandY);
@@ -2078,8 +2368,10 @@ HTML = """<!doctype html>
         }
       }
       if (msg.bob) {
-        if (drums) drums.hit();
+        if (drums && (!jamMode || djEnabled.head)) drums.hit();
         flashBob();
+        djTrackBPM();
+        djFlashMeter('head');
       }
       if (msg.blink && drums) drums.rim();
 
