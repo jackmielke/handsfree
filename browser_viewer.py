@@ -200,15 +200,74 @@ def _voice_loop() -> None:
 # Whisper bias prompt: feeding the model a sentence that uses our command
 # vocabulary makes it vastly more likely to pick these words over common-
 # English neighbors. This is how we get a "dictionary" without retraining.
-_VOICE_BIAS_PROMPT = (
-    "Voice commands: open Telegram, open Notion, open Arc, open Slack, "
-    "open Spotify, open Figma, open Safari, open Chrome, open Cursor, "
-    "open Terminal, open Finder, open Messages, open Mail, open Calendar, "
-    "close Telegram, close Notion, close Arc. "
-    "Scroll up, scroll down, page up, page down. "
-    "Click, tap, volume up, volume down, mute. "
-    "Next desktop, previous desktop."
-)
+def _scan_installed_apps() -> list:
+    """Enumerate /Applications, ~/Applications, and /System/Applications
+    for *.app bundles. Returns clean app names (no .app suffix), deduped,
+    alphabetized, and trimmed to skip obvious noise. Called once at import."""
+    import os as _os
+    seen = set()
+    out = []
+    for root in ("/Applications", _os.path.expanduser("~/Applications"),
+                 "/System/Applications", "/System/Applications/Utilities"):
+        try:
+            entries = _os.listdir(root)
+        except OSError:
+            continue
+        for name in entries:
+            if not name.endswith(".app"):
+                continue
+            bare = name[:-4].strip()
+            if not bare or bare.startswith("."):
+                continue
+            key = bare.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(bare)
+    out.sort(key=str.lower)
+    return out
+
+
+INSTALLED_APPS: list = _scan_installed_apps()
+print(f"[viewer] found {len(INSTALLED_APPS)} installed apps "
+      f"for voice bias", flush=True)
+
+
+def _build_voice_bias_prompt(apps: list) -> str:
+    """Compose the Whisper initial_prompt. Keeps total length reasonable
+    (tiny.en model ignores tokens past ~224 anyway) by sampling a core
+    set of likely-said apps first, then filling with the rest."""
+    # Whisper pays most attention to the START of the prompt; front-load
+    # common everyday-use apps, then append the rest.
+    priority = [
+        "Telegram", "Notion", "Arc", "Slack", "Spotify", "Figma",
+        "Safari", "Chrome", "Cursor", "Terminal", "Finder",
+        "Messages", "Mail", "Calendar", "ChatGPT", "Claude",
+        "Raycast", "Superhuman", "Signal", "WhatsApp", "Discord",
+        "Visual Studio Code", "Zoom", "Loom", "Wispr Flow",
+    ]
+    installed_lc = {a.lower(): a for a in apps}
+    ordered = []
+    for p in priority:
+        if p.lower() in installed_lc:
+            ordered.append(installed_lc[p.lower()])
+    for a in apps:
+        if a not in ordered:
+            ordered.append(a)
+    # First chunk: "open X" phrasings of the top entries.
+    head = ", ".join(f"open {a}" for a in ordered[:18])
+    # Then a flat roster of names so saying JUST the app name also biases.
+    roster = ", ".join(ordered)
+    return (
+        f"Voice commands: {head}. "
+        f"Apps: {roster}. "
+        "Scroll up, scroll down, page up, page down. "
+        "Click, tap, volume up, volume down, mute. "
+        "Next desktop, previous desktop."
+    )
+
+
+_VOICE_BIAS_PROMPT = _build_voice_bias_prompt(INSTALLED_APPS)
 
 # Rolling buffer of recent utterances so the UI can show what Whisper
 # actually heard, even for phrases that didn't match a command.
@@ -764,8 +823,12 @@ HTML = """<!doctype html>
       <div class="cc-label">scroll mode</div>
       <div class="cc-opts" id="cc-scroll-mode-opts">
         <button class="cc-opt" data-v="off">off</button>
-        <button class="cc-opt" data-v="fist">fist</button>
-        <button class="cc-opt" data-v="two_hands">two hands</button>
+        <button class="cc-opt" data-v="fist" title="Close one hand into a fist; move it to scroll">fist</button>
+        <button class="cc-opt" data-v="two_hands" title="Raise both hands; move them together to scroll">two hands</button>
+        <button class="cc-opt" data-v="head_lefthand" title="Raise left hand, then tilt chin up/down">✋ + head</button>
+        <button class="cc-opt" data-v="head_mouth" title="Open mouth to gate, then tilt chin up/down">👄 + head</button>
+        <button class="cc-opt" data-v="brow" title="Raise eyebrows = up, furrow = down">🙁 brows</button>
+        <button class="cc-opt" data-v="head_always" title="Always on — head pitch scrolls any time. Drifty.">head only</button>
       </div>
     </div>
     <div class="cc-row">
@@ -2944,6 +3007,15 @@ _scroll_sens: str = "normal"
 # "off" = disabled.
 _scroll_mode: str = "fist"
 _fist_scroll_prev: Optional[tuple] = None  # (y, x) normalized
+
+# Head-pitch scroll: tilt chin up/down to scroll, gated by a chosen signal.
+_head_scroll_baseline_y: Optional[float] = None
+_head_scroll_accum: float = 0.0
+HEAD_SCROLL_DEADBAND = 0.012  # ~1% of frame height around rest position
+
+# Brow-raise / brow-furrow scroll
+_brow_scroll_accum: float = 0.0
+BROW_SCROLL_THRESHOLD = 0.18  # blendshape must exceed this to count
 _fist_scroll_accum_y: float = 0.0
 _fist_scroll_accum_x: float = 0.0
 
@@ -3865,6 +3937,105 @@ def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
     return v_amt, h_amt
 
 
+def _update_head_scroll(hands_list, face_nose, blendshapes,
+                        now: float, gate: str) -> int:
+    """Head-pitch scroll. Continuous vertical scroll based on how far
+    your nose has moved from the 'center' captured when the gate first
+    engaged.
+
+    gate: 'lefthand' → left hand raised above threshold
+          'mouth'    → mouth-open hold (jawOpen > threshold)
+          'always'   → no gate (head pitch always scrolls — careful)
+
+    Returns signed scroll amount; negative = down, positive = up.
+    Chin up (nose y decreasing in image coords) → scroll up, and vice versa.
+    """
+    global _head_scroll_baseline_y, _head_scroll_accum, _scroll_active
+    if _jam_mode or face_nose is None:
+        _head_scroll_baseline_y = None
+        _head_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    # --- gate check ---
+    active = False
+    if gate == "lefthand":
+        lx, ly, _rx, _ry = _split_hands_xy(hands_list)
+        active = (ly is not None and ly < HAND_THRESHOLD)
+    elif gate == "mouth":
+        if blendshapes:
+            for b in blendshapes:
+                if b.category_name == "jawOpen":
+                    active = float(b.score) > MOUTH_CLICK_THRESHOLD
+                    break
+    elif gate == "always":
+        active = True
+    if not active:
+        _head_scroll_baseline_y = None
+        _head_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    _scroll_active = True
+    ny = float(face_nose[1])
+    if _head_scroll_baseline_y is None:
+        _head_scroll_baseline_y = ny
+        _head_scroll_accum = 0.0
+        return 0
+    # Dead-zone near baseline so resting head position doesn't drift.
+    delta = ny - _head_scroll_baseline_y
+    if abs(delta) < HEAD_SCROLL_DEADBAND:
+        return 0
+    # Slowly re-center baseline so the user can "hold" a direction
+    # without running out of neck range (drift correction).
+    _head_scroll_baseline_y += delta * 0.003
+    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    # Nose y decreases when chin goes up → scroll up (positive amount)
+    per_frame = -delta * gain * 0.8
+    _head_scroll_accum += per_frame
+    amt = 0
+    if abs(_head_scroll_accum) >= 1.0:
+        amt = int(_head_scroll_accum)
+        _head_scroll_accum -= amt
+    return amt
+
+
+def _update_brow_scroll(blendshapes, now: float) -> int:
+    """Scroll via eyebrow blendshapes.
+    browInnerUp → scroll up, browDownLeft/Right (average) → scroll down.
+    Proportional to blendshape intensity above a deadband."""
+    global _brow_scroll_accum, _scroll_active
+    if _jam_mode or not blendshapes:
+        _brow_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    up = 0.0; down_l = 0.0; down_r = 0.0
+    for b in blendshapes:
+        n = b.category_name
+        if n == "browInnerUp":
+            up = float(b.score)
+        elif n == "browDownLeft":
+            down_l = float(b.score)
+        elif n == "browDownRight":
+            down_r = float(b.score)
+    down = (down_l + down_r) * 0.5
+    signal = 0.0
+    if up > BROW_SCROLL_THRESHOLD and up > down:
+        signal = (up - BROW_SCROLL_THRESHOLD)
+    elif down > BROW_SCROLL_THRESHOLD and down > up:
+        signal = -(down - BROW_SCROLL_THRESHOLD)
+    if signal == 0.0:
+        _brow_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    _scroll_active = True
+    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    _brow_scroll_accum += signal * gain * 0.08
+    amt = 0
+    if abs(_brow_scroll_accum) >= 1.0:
+        amt = int(_brow_scroll_accum)
+        _brow_scroll_accum -= amt
+    return amt
+
+
 def _update_two_hand_scroll(hands_list, now: float) -> int:
     """Two hands visible → scroll mode. Returns signed scroll amount
     (positive = up, negative = down, 0 = no scroll this frame).
@@ -4624,6 +4795,27 @@ def _capture_loop() -> None:
                     pyautogui.scroll(scroll_amt, _pause=False)
                 except Exception as e:
                     print(f"[viewer] scroll failed: {e}", flush=True)
+        elif _scroll_mode in ("head_lefthand", "head_mouth", "head_always"):
+            gate = {
+                "head_lefthand": "lefthand",
+                "head_mouth":    "mouth",
+                "head_always":   "always",
+            }[_scroll_mode]
+            scroll_amt = _update_head_scroll(
+                hands_lm_list, face_nose, face_blendshapes, now, gate,
+            )
+            if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
+                try:
+                    pyautogui.scroll(scroll_amt, _pause=False)
+                except Exception as e:
+                    print(f"[viewer] head-scroll failed: {e}", flush=True)
+        elif _scroll_mode == "brow":
+            scroll_amt = _update_brow_scroll(face_blendshapes, now)
+            if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
+                try:
+                    pyautogui.scroll(scroll_amt, _pause=False)
+                except Exception as e:
+                    print(f"[viewer] brow-scroll failed: {e}", flush=True)
         face_lms = None
         if fres is not None:
             try:
@@ -4906,6 +5098,24 @@ def _match_command(text: str):
     m = _CLOSE_RE.search(t)
     if m:
         return {"action": "close", "target": _clean_target(m.group(1))}
+    # Bare app name: if the transcript (minus trailing punct / "please" etc)
+    # matches a known installed app name, treat it as "open <app>".
+    # Only fires for short utterances so we don't hijack real sentences.
+    stripped = re.sub(r"[^a-z0-9 ]+", "", t).strip()
+    stripped = re.sub(r"\s+(please|now|app|application)$", "", stripped)
+    if stripped and len(stripped.split()) <= 4:
+        if stripped in APP_ALIASES:
+            return {"action": "open", "target": stripped}
+        for app in INSTALLED_APPS:
+            al = app.lower()
+            if stripped == al or stripped == al.replace(".", ""):
+                return {"action": "open", "target": app}
+        # Also match the first word vs single-word app names for speed
+        first = stripped.split()[0]
+        for app in INSTALLED_APPS:
+            al = app.lower()
+            if " " not in al and al == first:
+                return {"action": "open", "target": app}
     return None
 
 def _dispatch_command(cmd: dict) -> dict:
@@ -5203,7 +5413,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if action == "scroll_mode":
                 mode = data.get("mode")
-                if mode in ("fist", "two_hands", "off"):
+                if mode in ("fist", "two_hands", "off",
+                            "head_lefthand", "head_mouth",
+                            "head_always", "brow"):
                     _scroll_mode = mode
                     _scroll_gesture_enabled = (mode != "off")
                     print(f"[viewer] scroll mode = {_scroll_mode}", flush=True)
