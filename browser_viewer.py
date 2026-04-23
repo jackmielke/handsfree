@@ -660,7 +660,9 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
-        <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold (only when click=mouth)">mouth hold</button>
+        <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold the mouse button">mouth hold</button>
+        <button class="cc-opt" data-exp="peace_rclick" title="Flash a peace sign ✌️ to right-click">✌️ right-click</button>
+        <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to double-click">👍 double-click</button>
       </div>
     </div>
     <div class="cc-row">
@@ -2472,6 +2474,14 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
       }
+      if ('peaceRclick' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="peace_rclick"]');
+        if (b) b.classList.toggle('on', !!msg.peaceRclick);
+      }
+      if ('thumbsDclick' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="thumbs_dclick"]');
+        if (b) b.classList.toggle('on', !!msg.thumbsDclick);
+      }
       if (msg.clapTick) {
         clapCount += 1;
         const ci = document.getElementById('cc-clap-indicator');
@@ -2891,6 +2901,18 @@ T_GESTURE_COOLDOWN_S: float = 1.2
 # mouth-close = mouseUp (press-and-hold instead of discrete click).
 _mouth_hold_enabled: bool = False
 _mouth_hold_down: bool = False
+
+# Peace sign ✌️ → right-click (edge-triggered, armed like pinch).
+_peace_rclick_enabled: bool = False
+_peace_armed: bool = True
+_peace_last_at: float = 0.0
+
+# Thumbs up 👍 → double-click.
+_thumbs_dclick_enabled: bool = False
+_thumbs_armed: bool = True
+_thumbs_last_at: float = 0.0
+
+GESTURE_COOLDOWN_S: float = 1.0
 # Pending-click mechanism so two primaries within DOUBLE_WINDOW_S merge into
 # one double-click instead of firing two singles.
 _pending_click_at: float = 0.0
@@ -4241,6 +4263,79 @@ def _detect_t_gesture(hands_lm_list, now: float) -> bool:
     return True
 
 
+def _finger_extended(hand, tip_idx: int, pip_idx: int) -> bool:
+    """True if the fingertip is meaningfully farther from the wrist than
+    the PIP joint — a reliable extension check that works at any hand angle."""
+    wrist = hand[0]
+    def d(lm):
+        return math.hypot(lm.x - wrist.x, lm.y - wrist.y)
+    return d(hand[tip_idx]) > d(hand[pip_idx]) * 1.15
+
+
+def _finger_curled(hand, tip_idx: int, pip_idx: int) -> bool:
+    wrist = hand[0]
+    def d(lm):
+        return math.hypot(lm.x - wrist.x, lm.y - wrist.y)
+    return d(hand[tip_idx]) < d(hand[pip_idx]) * 1.05
+
+
+def _is_peace_sign(hand) -> bool:
+    """✌️: index + middle extended, ring + pinky curled."""
+    idx_ext  = _finger_extended(hand, 8, 6)
+    mid_ext  = _finger_extended(hand, 12, 10)
+    ring_cur = _finger_curled(hand, 16, 14)
+    pink_cur = _finger_curled(hand, 20, 18)
+    return idx_ext and mid_ext and ring_cur and pink_cur
+
+
+def _is_thumbs_up(hand) -> bool:
+    """👍: thumb tip well above wrist, all four fingers curled."""
+    thumb_tip = hand[4]
+    wrist = hand[0]
+    # Thumb clearly above wrist (y decreases upward in image coords)
+    thumb_up = (wrist.y - thumb_tip.y) > 0.10
+    idx_cur  = _finger_curled(hand, 8, 6)
+    mid_cur  = _finger_curled(hand, 12, 10)
+    ring_cur = _finger_curled(hand, 16, 14)
+    pink_cur = _finger_curled(hand, 20, 18)
+    return thumb_up and idx_cur and mid_cur and ring_cur and pink_cur
+
+
+def _edge_trigger_gesture(match: bool, armed_flag: str, last_at_flag: str,
+                          now: float, cooldown: float = GESTURE_COOLDOWN_S) -> bool:
+    """Generic edge-trigger: only fires on the transition into `match`,
+    with per-gesture cooldown. Uses global state via getattr."""
+    g = globals()
+    armed = g[armed_flag]
+    last_at = g[last_at_flag]
+    if not match:
+        g[armed_flag] = True
+        return False
+    if not armed:
+        return False
+    if now - last_at < cooldown:
+        return False
+    g[armed_flag] = False
+    g[last_at_flag] = now
+    return True
+
+
+def _detect_peace_rclick(hands_lm_list, now: float) -> bool:
+    if not hands_lm_list:
+        globals()['_peace_armed'] = True
+        return False
+    match = any(_is_peace_sign(h) for h in hands_lm_list)
+    return _edge_trigger_gesture(match, '_peace_armed', '_peace_last_at', now)
+
+
+def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
+    if not hands_lm_list:
+        globals()['_thumbs_armed'] = True
+        return False
+    match = any(_is_thumbs_up(h) for h in hands_lm_list)
+    return _edge_trigger_gesture(match, '_thumbs_armed', '_thumbs_last_at', now)
+
+
 def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
                    blendshapes, now: float, hands_up_toggle: bool) -> str:
     """Move the cursor per `_pointing_method`. Return 'primary', 'right',
@@ -4328,6 +4423,11 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
             _update_mouth_hold(blendshapes, now)
         else:
             primary = _detect_mouth_click(blendshapes, now)
+    # Mouth-hold works regardless of click method — so you can still
+    # use e.g. pinch or brow-raise for normal clicks, and use mouth-open
+    # as a dedicated press-and-hold.
+    if _mouth_hold_enabled and _click_method != "mouth":
+        _update_mouth_hold(blendshapes, now)
     right = _detect_right_click(blendshapes, now)
     if right:
         return "right"
@@ -4482,6 +4582,22 @@ def _capture_loop() -> None:
         if _t_timeout_enabled and _detect_t_gesture(hands_lm_list, now):
             print("[viewer] T-gesture → master toggle", flush=True)
             _set_master(not _system_enabled, source="t-gesture")
+        # Peace sign ✌️ → right-click
+        if (_peace_rclick_enabled and _system_enabled
+                and _detect_peace_rclick(hands_lm_list, now)):
+            print("[viewer] peace ✌️ → right-click", flush=True)
+            try:
+                pyautogui.rightClick(_pause=False)
+            except Exception as e:
+                print(f"[viewer] rightClick failed: {e}", flush=True)
+        # Thumbs up 👍 → double-click
+        if (_thumbs_dclick_enabled and _system_enabled
+                and _detect_thumbs_dclick(hands_lm_list, now)):
+            print("[viewer] thumbs 👍 → double-click", flush=True)
+            try:
+                pyautogui.doubleClick(_pause=False)
+            except Exception as e:
+                print(f"[viewer] doubleClick failed: {e}", flush=True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
@@ -5177,6 +5293,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "mouthHold": _mouth_hold_enabled}).encode(),
                 )
                 return
+            if action == "peace_rclick":
+                global _peace_rclick_enabled, _peace_armed
+                _peace_rclick_enabled = bool(data.get("on"))
+                _peace_armed = True
+                print(f"[viewer] peace-rclick = {_peace_rclick_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "peaceRclick": _peace_rclick_enabled}).encode(),
+                )
+                return
+            if action == "thumbs_dclick":
+                global _thumbs_dclick_enabled, _thumbs_armed
+                _thumbs_dclick_enabled = bool(data.get("on"))
+                _thumbs_armed = True
+                print(f"[viewer] thumbs-dclick = {_thumbs_dclick_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
+                )
+                return
             if action == "clap_preset":
                 global _clap_preset
                 global CLAP_CLOSE_THRESHOLD, CLAP_FAR_THRESHOLD
@@ -5345,6 +5481,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
                         "mouthHold": _mouth_hold_enabled,
+                        "peaceRclick": _peace_rclick_enabled,
+                        "thumbsDclick": _thumbs_dclick_enabled,
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
                         "tabSwipe": _tab_swipe_enabled,
