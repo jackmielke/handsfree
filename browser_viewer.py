@@ -656,6 +656,13 @@ HTML = """<!doctype html>
 
   <div id="cc-panel">
 <!-- cursor on/off is now the big master toggle in the top bar -->
+    <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
+      <div class="cc-label" style="color:#b48cff;">experiments</div>
+      <div class="cc-opts" id="cc-exp-opts">
+        <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
+        <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold (only when click=mouth)">mouth hold</button>
+      </div>
+    </div>
     <div class="cc-row">
       <div class="cc-label">pointing</div>
       <div class="cc-opts" id="cc-point-opts">
@@ -1633,6 +1640,23 @@ HTML = """<!doctype html>
     }).catch(() => {});
   });
 
+  // Experimental toggles at top of CC panel.
+  const ccExp = document.getElementById('cc-exp-opts');
+  if (ccExp) {
+    ccExp.addEventListener('click', (e) => {
+      const b = e.target.closest('.cc-opt'); if (!b) return;
+      const key = b.dataset.exp;
+      const turnOn = !b.classList.contains('on');
+      b.classList.toggle('on', turnOn);
+      const action = key; // 't_timeout' or 'mouth_hold'
+      fetch('/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, on: turnOn }),
+      }).catch(() => {});
+    });
+  }
+
   ccPoint.addEventListener('click', (e) => {
     const b = e.target.closest('.cc-opt'); if (!b) return;
     paintActive(ccPoint, b.dataset.v);
@@ -2440,6 +2464,14 @@ HTML = """<!doctype html>
             ? 'var(--cool)' : 'var(--warm)';
         }
       }
+      if ('tTimeout' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="t_timeout"]');
+        if (b) b.classList.toggle('on', !!msg.tTimeout);
+      }
+      if ('mouthHold' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
+        if (b) b.classList.toggle('on', !!msg.mouthHold);
+      }
       if (msg.clapTick) {
         clapCount += 1;
         const ci = document.getElementById('cc-clap-indicator');
@@ -2847,6 +2879,18 @@ _last_pucker_click_at: float = 0.0
 _pucker_click_armed: bool = True
 _last_furrow_click_at: float = 0.0
 _furrow_click_armed: bool = True
+
+# --- Experimental toggles (off by default) ---
+# T-gesture = timeout: make a T with both hands to toggle master on/off.
+_t_timeout_enabled: bool = False
+_t_gesture_armed: bool = True
+_t_last_trigger_at: float = 0.0
+T_GESTURE_COOLDOWN_S: float = 1.2
+
+# Mouth-hold: when mouth click is primary, mouth-open = mouseDown,
+# mouth-close = mouseUp (press-and-hold instead of discrete click).
+_mouth_hold_enabled: bool = False
+_mouth_hold_down: bool = False
 # Pending-click mechanism so two primaries within DOUBLE_WINDOW_S merge into
 # one double-click instead of firing two singles.
 _pending_click_at: float = 0.0
@@ -3619,6 +3663,8 @@ def _set_master(on: bool, source: str = "") -> None:
     else:
         # Ensure any held dictation key isn't stuck after a hard off.
         _release_wispr_key_up()
+        # Release any mouse button held via mouth-hold experiment.
+        _mouth_hold_release()
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
@@ -4014,6 +4060,44 @@ def _detect_mouth_click(blendshapes, now: float) -> bool:
     return fired
 
 
+def _update_mouth_hold(blendshapes, now: float) -> None:
+    """Mouth-open = mouseDown, mouth-close = mouseUp. Gated by
+    _mouth_hold_enabled and _click_method == 'mouth'. Safe to call every frame."""
+    global _mouth_hold_down
+    if not blendshapes:
+        return
+    jaw = 0.0
+    for b in blendshapes:
+        if b.category_name == "jawOpen":
+            jaw = float(b.score)
+            break
+    if jaw > MOUTH_CLICK_THRESHOLD and not _mouth_hold_down:
+        try:
+            pyautogui.mouseDown(_pause=False)
+            _mouth_hold_down = True
+            print("[viewer] mouth-hold → mouseDown", flush=True)
+        except Exception as e:
+            print(f"[viewer] mouseDown failed: {e}", flush=True)
+    elif jaw < MOUTH_CLICK_OPEN_THR and _mouth_hold_down:
+        try:
+            pyautogui.mouseUp(_pause=False)
+            _mouth_hold_down = False
+            print("[viewer] mouth-hold → mouseUp", flush=True)
+        except Exception as e:
+            print(f"[viewer] mouseUp failed: {e}", flush=True)
+
+
+def _mouth_hold_release() -> None:
+    """Release any held mouse button — called on disable or master-off."""
+    global _mouth_hold_down
+    if _mouth_hold_down:
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+        _mouth_hold_down = False
+
+
 def _detect_smile_rightclick(blendshapes, now: float) -> bool:
     global _last_smile_click_at, _smile_click_armed
     if not blendshapes:
@@ -4103,6 +4187,60 @@ def _detect_pinch_click(hands_lm_list, now: float) -> bool:
     return fired
 
 
+def _detect_t_gesture(hands_lm_list, now: float) -> bool:
+    """Edge-triggered T-shape: one hand vertical (fingers up), the other
+    hand horizontal, with horizontal hand's midpoint near vertical hand's
+    fingertips. Returns True once per gesture (armed/unarmed like pinch)."""
+    global _t_gesture_armed, _t_last_trigger_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _t_gesture_armed = True
+        return False
+    # Use first two hands seen.
+    h1, h2 = hands_lm_list[0], hands_lm_list[1]
+
+    def axis(h):
+        # wrist (0) → middle fingertip (12)
+        dx = h[12].x - h[0].x
+        dy = h[12].y - h[0].y
+        return dx, dy
+
+    def is_vertical(dx, dy):
+        # fingers up → dy negative (y grows downward), |dy| >> |dx|
+        return dy < -0.05 and abs(dy) > abs(dx) * 1.7
+
+    def is_horizontal(dx, dy):
+        return abs(dx) > 0.06 and abs(dx) > abs(dy) * 1.7
+
+    ax1 = axis(h1); ax2 = axis(h2)
+    vert = horiz = None
+    if is_vertical(*ax1) and is_horizontal(*ax2):
+        vert, horiz = h1, h2
+    elif is_vertical(*ax2) and is_horizontal(*ax1):
+        vert, horiz = h2, h1
+    if vert is None:
+        _t_gesture_armed = True
+        return False
+    # Horizontal hand should cross near the TOP of the vertical hand.
+    # midpoint of horizontal hand's axis:
+    hmx = (horiz[0].x + horiz[12].x) / 2
+    hmy = (horiz[0].y + horiz[12].y) / 2
+    # vertical hand's fingertip region:
+    vtx = vert[12].x; vty = vert[12].y
+    # distance from horizontal midpoint to vertical fingertip area
+    d = math.hypot(hmx - vtx, hmy - vty)
+    if d > 0.18:
+        _t_gesture_armed = True
+        return False
+    # Now it's a T.
+    if not _t_gesture_armed:
+        return False
+    if now - _t_last_trigger_at < T_GESTURE_COOLDOWN_S:
+        return False
+    _t_gesture_armed = False
+    _t_last_trigger_at = now
+    return True
+
+
 def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
                    blendshapes, now: float, hands_up_toggle: bool) -> str:
     """Move the cursor per `_pointing_method`. Return 'primary', 'right',
@@ -4186,7 +4324,10 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     elif _click_method == "blink":
         primary = _detect_blink_click(blendshapes, now)
     elif _click_method == "mouth":
-        primary = _detect_mouth_click(blendshapes, now)
+        if _mouth_hold_enabled:
+            _update_mouth_hold(blendshapes, now)
+        else:
+            primary = _detect_mouth_click(blendshapes, now)
     right = _detect_right_click(blendshapes, now)
     if right:
         return "right"
@@ -4337,6 +4478,10 @@ def _capture_loop() -> None:
         left_x, left_y, right_x, right_y = _split_hands_xy(hands_lm_list)
 
         hands_up_toggle = _update_hands_up(hands_lm_list, now)
+        # T-gesture master toggle (experimental, off by default)
+        if _t_timeout_enabled and _detect_t_gesture(hands_lm_list, now):
+            print("[viewer] T-gesture → master toggle", flush=True)
+            _set_master(not _system_enabled, source="t-gesture")
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
@@ -5011,6 +5156,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }).encode(),
                 )
                 return
+            if action == "t_timeout":
+                global _t_timeout_enabled, _t_gesture_armed
+                _t_timeout_enabled = bool(data.get("on"))
+                _t_gesture_armed = True
+                print(f"[viewer] t-timeout = {_t_timeout_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "tTimeout": _t_timeout_enabled}).encode(),
+                )
+                return
+            if action == "mouth_hold":
+                global _mouth_hold_enabled
+                _mouth_hold_enabled = bool(data.get("on"))
+                if not _mouth_hold_enabled:
+                    _mouth_hold_release()
+                print(f"[viewer] mouth-hold = {_mouth_hold_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "mouthHold": _mouth_hold_enabled}).encode(),
+                )
+                return
             if action == "clap_preset":
                 global _clap_preset
                 global CLAP_CLOSE_THRESHOLD, CLAP_FAR_THRESHOLD
@@ -5177,6 +5343,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "doubleClick": _double_click_on,
                         "cursorSens": round(_cursor_sens, 2),
                         "systemEnabled": _system_enabled,
+                        "tTimeout": _t_timeout_enabled,
+                        "mouthHold": _mouth_hold_enabled,
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
                         "tabSwipe": _tab_swipe_enabled,
