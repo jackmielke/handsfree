@@ -15,7 +15,6 @@ import json
 import math
 import os
 import re
-import sys
 import tempfile
 import socketserver
 import signal
@@ -547,11 +546,11 @@ HTML = """<!doctype html>
     <button id="vt-btn"  type="button">voice test</button>
     <button id="jam-btn" type="button">jam mode</button>
     <button id="reset-btn" type="button"
-      title="Restart the server (full Python process restart with confirmation). Use when mouth-click or cursor get wedged."
+      title="Soft reset: rearms click detectors and recalibrates cursor. Quick fix when mouth click or hand cursor get stuck."
       style="cursor:pointer; font-size:10px; letter-spacing:0.16em;
       text-transform:uppercase; font-weight:700; padding:6px 14px;
       border-radius:999px; border:1px solid #b48cff; background:#15151c;
-      color:#b48cff;">↻ restart</button>
+      color:#b48cff;">↻ reset</button>
     <button id="master-btn" type="button" title="Master on/off. Double-clap also toggles."
       style="font-size:11px; letter-spacing:0.18em; font-weight:800;
              padding:8px 18px; border-radius:999px; border:1px solid;">
@@ -1158,46 +1157,35 @@ HTML = """<!doctype html>
     setJamMode(!jamMode);
   });
 
-  // Restart — full process restart after a confirm dialog. Replaces the
-  // Python interpreter in place (os.execv), so the Terminal window and
-  // mic/camera permissions are preserved. Browser polls / until the
-  // server is back, then auto-reloads.
+  // Soft reset — the "turn it off and on again" button. Rearms click
+  // detectors and kicks a fresh cursor calibration without process
+  // restart. Flashes green on success so the user gets feedback.
   const resetBtn = document.getElementById('reset-btn');
   resetBtn.addEventListener('click', async () => {
-    const ok = window.confirm(
-      'Restart the handsfree server?\n\n' +
-      'This fully reboots the Python process — camera, models, and ' +
-      'voice daemon will reload (~10s). The browser tab will auto-' +
-      'refresh when it\'s back.'
-    );
-    if (!ok) return;
-    resetBtn.textContent = '… restarting';
-    resetBtn.style.background = '#fbbf24';
-    resetBtn.style.color = '#1a1407';
+    const orig = resetBtn.textContent;
+    resetBtn.textContent = '… resetting';
     try {
-      await fetch('/command', {
+      const r = await fetch('/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'hard_restart' }),
+        body: JSON.stringify({ action: 'soft_reset' }),
       });
-    } catch {}
-    // Poll / every 500ms. Once it responds 200, reload the page.
-    const started = Date.now();
-    const poll = setInterval(async () => {
-      try {
-        const r = await fetch('/', { cache: 'no-store' });
-        if (r.ok) {
-          clearInterval(poll);
-          // Give the capture loop a moment to warm the camera.
-          setTimeout(() => window.location.reload(), 1500);
-        }
-      } catch {}
-      // Safety: give up after 60s so the button doesn't spin forever.
-      if (Date.now() - started > 60000) {
-        clearInterval(poll);
-        resetBtn.textContent = 'timed out';
+      const j = await r.json();
+      if (j.ok) {
+        resetBtn.style.background = '#6ee7b7';
+        resetBtn.style.color = '#05170f';
+        resetBtn.textContent = '✓ reset — hold pose';
+        setTimeout(() => {
+          resetBtn.textContent = orig;
+          resetBtn.style.background = '#15151c';
+          resetBtn.style.color = '#b48cff';
+        }, 1800);
+      } else {
+        resetBtn.textContent = 'err';
       }
-    }, 500);
+    } catch (e) {
+      resetBtn.textContent = 'err';
+    }
   });
 
   // Voice Test panel: dedicated UI for verifying "open telegram" etc.
@@ -4576,34 +4564,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     200, "application/json",
                     json.dumps({"ok": True, "jam": _jam_mode}).encode(),
                 )
-                return
-            if action == "hard_restart":
-                # Restart the Python process in place via os.execv, which
-                # replaces this process with a fresh one (same PID, same
-                # Terminal window, same mic/camera permissions). The tiny
-                # delay lets the HTTP response flush before we blow away
-                # the interpreter.
-                self._write_status(
-                    200, "application/json",
-                    json.dumps({"ok": True, "restarting": True}).encode(),
-                )
-                def _go():
-                    time.sleep(0.4)
-                    print("[viewer] hard restart requested — re-execing",
-                          flush=True)
-                    try:
-                        _stop.set()
-                    except Exception:
-                        pass
-                    try:
-                        _voice_stop.set()
-                    except Exception:
-                        pass
-                    # Close stdio buffers before exec.
-                    sys.stdout.flush(); sys.stderr.flush()
-                    os.execv(sys.executable,
-                             [sys.executable] + sys.argv)
-                threading.Thread(target=_go, daemon=True).start()
                 return
             if action == "soft_reset":
                 # The "turn the app off and on again" button. Rearms
