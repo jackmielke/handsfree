@@ -753,11 +753,11 @@ HTML = """<!doctype html>
     <div class="cc-row">
       <div class="cc-label">sensitivity</div>
       <div class="cc-opts" style="flex:1; min-width:0;">
-        <input type="range" id="cc-sens" min="0.3" max="2.0" step="0.05"
-               value="0.7" style="flex:1; accent-color:var(--accent);
+        <input type="range" id="cc-sens" min="0.3" max="3.0" step="0.05"
+               value="1.5" style="flex:1; accent-color:var(--accent);
                min-width:140px;">
         <span id="cc-sens-val" style="font-size:11px; color:var(--dim);
-              min-width:42px; text-align:right;">0.70×</span>
+              min-width:42px; text-align:right;">1.50×</span>
       </div>
     </div>
     <div class="cc-row">
@@ -2862,7 +2862,7 @@ _jam_mode: bool = False
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
 _pointing_method: str = "finger"  # "head" | "finger" | "gaze"
 _click_method: str = "mouth"      # primary (left) click gesture
-_cursor_sens: float = 0.7         # multiplier on all pointing-method gains
+_cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
 _double_click_on: bool = False    # double-tap primary within DBL window → double-click
 _wispr_method: str = "off"  # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|"apple_dictation"|"off"
@@ -2892,7 +2892,7 @@ _furrow_click_armed: bool = True
 
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
-_t_timeout_enabled: bool = False
+_t_timeout_enabled: bool = True
 _t_gesture_armed: bool = True
 _t_last_trigger_at: float = 0.0
 T_GESTURE_COOLDOWN_S: float = 1.2
@@ -5175,7 +5175,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     v = float(data.get("value", _cursor_sens))
                 except (TypeError, ValueError):
                     v = _cursor_sens
-                _cursor_sens = max(0.15, min(2.5, v))
+                _cursor_sens = max(0.15, min(3.5, v))
                 print(f"[viewer] cursor sens = {_cursor_sens:.2f}", flush=True)
                 self._write_status(
                     200, "application/json",
