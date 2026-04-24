@@ -467,6 +467,13 @@ HTML = """<!doctype html>
     opacity:0; transition: opacity 200ms ease-out; }
   .clap-flash.on { opacity: 1; }
   body.clap-pulse { box-shadow: inset 0 0 120px rgba(110,231,183,0.35); transition: box-shadow 180ms ease-out; }
+  body.atelier-on { box-shadow: inset 0 0 220px rgba(245,194,74,0.18), inset 0 0 80px rgba(122,167,255,0.12); }
+  body.atelier-on::after {
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:1;
+    background:
+      radial-gradient(circle at 10% 90%, rgba(245,194,74,0.10), transparent 40%),
+      radial-gradient(circle at 90% 10%, rgba(122,167,255,0.10), transparent 40%);
+  }
   body.system-off { filter: grayscale(0.6) brightness(0.75); }
   body.system-off::before { content:"paused · double clap to resume";
     position:fixed; top:12px; left:50%; transform:translateX(-50%);
@@ -733,6 +740,8 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold the mouse button">mouth hold</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Flash a peace sign ✌️ to right-click">✌️ right-click</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to double-click">👍 double-click</button>
+        <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
+        <button class="cc-opt" id="cc-atelier-manual" title="Force atelier mode on/off without doing the pose">atelier: off</button>
       </div>
     </div>
     <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
@@ -1123,6 +1132,12 @@ HTML = """<!doctype html>
              style="font-size:10px; letter-spacing:0.16em; text-transform:uppercase;
              color:var(--dim); background:#1a1a24; padding:4px 10px;
              border-radius:999px; font-weight:700;">voice: off</div>
+        <div id="atelier-pill" style="display:none;
+             font-size:11px; letter-spacing:0.22em; text-transform:uppercase;
+             color:#05170f;
+             background:linear-gradient(90deg,#f5c24a,#ff7ad9,#7aa7ff);
+             padding:5px 12px; border-radius:999px; font-weight:800;
+             box-shadow:0 0 18px rgba(245,194,74,0.6);">✨ atelier</div>
       </div>
 
       <details class="sec">
@@ -1877,16 +1892,61 @@ HTML = """<!doctype html>
   if (ccExp) {
     ccExp.addEventListener('click', (e) => {
       const b = e.target.closest('.cc-opt'); if (!b) return;
-      const key = b.dataset.exp;
+      // Manual atelier-mode force button (sibling in the exp row).
+      if (b.id === 'cc-atelier-manual') {
+        const turnOn = !b.classList.contains('on');
+        b.classList.toggle('on', turnOn);
+        b.textContent = 'atelier: ' + (turnOn ? 'ON' : 'off');
+        fetch('/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'atelier_force', on: turnOn }),
+        }).catch(() => {});
+        return;
+      }
+      const key = b.dataset.exp; if (!key) return;
       const turnOn = !b.classList.contains('on');
       b.classList.toggle('on', turnOn);
-      const action = key; // 't_timeout' or 'mouth_hold'
       fetch('/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, on: turnOn }),
+        body: JSON.stringify({ action: key, on: turnOn }),
       }).catch(() => {});
     });
+  }
+
+  // ✨ Atelier toast — flashes when the mode toggles on or off.
+  function atelierToast(on) {
+    const t = document.createElement('div');
+    t.textContent = on ? '✨ atelier mode' : 'atelier off';
+    t.style.cssText = `
+      position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      z-index:99999; pointer-events:none;
+      font-size:${on ? '42px' : '28px'}; font-weight:800;
+      letter-spacing:0.08em; color:#05170f;
+      background:linear-gradient(90deg,#f5c24a,#ff7ad9,#7aa7ff);
+      padding:18px 36px; border-radius:18px;
+      box-shadow:0 0 64px rgba(245,194,74,0.7), 0 0 32px rgba(122,167,255,0.5);
+      opacity:0; transition:opacity 220ms ease, transform 380ms ease;
+    `;
+    document.body.appendChild(t);
+    requestAnimationFrame(() => {
+      t.style.opacity = '1';
+      t.style.transform = 'translate(-50%,-50%) scale(1.05)';
+    });
+    setTimeout(() => {
+      t.style.opacity = '0';
+      setTimeout(() => t.remove(), 400);
+    }, 900);
+  }
+  function atelierActionFlash(action) {
+    // Little corner indicator for each atelier action (dev feedback).
+    const pill = document.getElementById('atelier-pill');
+    if (!pill) return;
+    const prev = pill.textContent;
+    pill.textContent = '✨ ' + action.replace('_', ' ');
+    clearTimeout(pill._flashT);
+    pill._flashT = setTimeout(() => { pill.textContent = prev; }, 300);
   }
 
   ccPoint.addEventListener('click', (e) => {
@@ -2715,6 +2775,25 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="thumbs_dclick"]');
         if (b) b.classList.toggle('on', !!msg.thumbsDclick);
       }
+      if ('atelierEnabled' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="atelier"]');
+        if (b) b.classList.toggle('on', !!msg.atelierEnabled);
+      }
+      if ('atelierMode' in msg) {
+        const pill = document.getElementById('atelier-pill');
+        if (pill) pill.style.display = msg.atelierMode ? 'inline-block' : 'none';
+        const mb = document.getElementById('cc-atelier-manual');
+        if (mb) {
+          mb.classList.toggle('on', !!msg.atelierMode);
+          mb.textContent = 'atelier: ' + (msg.atelierMode ? 'ON' : 'off');
+        }
+        document.body.classList.toggle('atelier-on', !!msg.atelierMode);
+      }
+      if (msg.atelierToggled) {
+        const pill = document.getElementById('atelier-pill');
+        atelierToast(pill && pill.style.display !== 'none');
+      }
+      if (msg.atelierAction) atelierActionFlash(msg.atelierAction);
       if ('releaseExtraTap' in msg) {
         const b = document.getElementById('cc-fn-release-tap');
         if (b) b.classList.toggle('on', !!msg.releaseExtraTap);
@@ -3096,6 +3175,8 @@ _prayer_active = False
 _boot_pending = False
 _clap_tick_pending = False
 _swipe_pending: Optional[str] = None  # "left" or "right"
+_atelier_toggle_pending: bool = False
+_atelier_action_pending: Optional[str] = None
 _dictation_pending = False
 _left_hand_y: Optional[float] = None
 _right_hand_y: Optional[float] = None
@@ -3159,6 +3240,23 @@ _peace_last_at: float = 0.0
 _thumbs_dclick_enabled: bool = False
 _thumbs_armed: bool = True
 _thumbs_last_at: float = 0.0
+
+# ✨ Atelier mode — A-pose (fingertips together, wrists spread low, elbows
+# wide) toggles a Figma-focused "design canvas" mode. While active, two-
+# handed gestures map to zoom & pan: spreading hands = zoom in, squeezing
+# = zoom out, translating both hands together = pan the canvas.
+_atelier_enabled: bool = True       # feature on/off (user can disable)
+_atelier_mode: bool = False         # currently IN atelier mode
+_atelier_armed: bool = True
+_atelier_last_at: float = 0.0
+ATELIER_COOLDOWN_S: float = 1.2
+_atelier_baseline_dist: Optional[float] = None
+_atelier_baseline_cx: Optional[float] = None
+_atelier_baseline_cy: Optional[float] = None
+_atelier_last_action_at: float = 0.0
+ATELIER_ACTION_COOLDOWN_S: float = 0.08
+ATELIER_ZOOM_DELTA: float = 0.035    # wrist-dist change to trigger zoom step
+ATELIER_PAN_DELTA: float = 0.025     # centroid change to trigger pan step
 
 GESTURE_COOLDOWN_S: float = 1.0
 # Pending-click mechanism so two primaries within DOUBLE_WINDOW_S merge into
@@ -4822,6 +4920,128 @@ def _detect_t_gesture(hands_lm_list, now: float) -> bool:
     return True
 
 
+def _detect_a_pose(hands_lm_list, now: float) -> bool:
+    """Edge-triggered A-pose: both hands visible, index+middle fingertips
+    of the two hands meet near each other up top, wrists spread wider
+    apart and lower (forming an 'A' with the arms). Returns True once per
+    pose (armed/unarmed)."""
+    global _atelier_armed, _atelier_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _atelier_armed = True
+        return False
+    h1, h2 = hands_lm_list[0], hands_lm_list[1]
+    # Fingertip centroid = avg of index(8) + middle(12) tips
+    def tip_centroid(h):
+        return ((h[8].x + h[12].x) / 2, (h[8].y + h[12].y) / 2)
+    t1 = tip_centroid(h1)
+    t2 = tip_centroid(h2)
+    tip_dist = math.hypot(t1[0] - t2[0], t1[1] - t2[1])
+    wrist_dist = abs(h1[0].x - h2[0].x)
+    # A-pose conditions:
+    # - fingertips close together (< 0.09)
+    # - wrists meaningfully wider apart than fingertips (>= 2x, and > 0.18)
+    # - fingertips above wrists (y smaller = higher on screen)
+    tips_y = (t1[1] + t2[1]) / 2
+    wrists_y = (h1[0].y + h2[0].y) / 2
+    tips_above = tips_y < wrists_y - 0.04
+    if not (tip_dist < 0.09
+            and wrist_dist > max(0.18, tip_dist * 2.5)
+            and tips_above):
+        _atelier_armed = True
+        return False
+    if not _atelier_armed:
+        return False
+    if now - _atelier_last_at < ATELIER_COOLDOWN_S:
+        return False
+    _atelier_armed = False
+    _atelier_last_at = now
+    return True
+
+
+def _update_atelier(hands_lm_list, now: float) -> Optional[str]:
+    """While atelier mode is active, read two-hand geometry and drive
+    Figma-friendly zoom + pan. Returns a short action label for feedback
+    ('zoom_in' / 'zoom_out' / 'pan_left' / 'pan_right' / 'pan_up' /
+    'pan_down'), or None.
+
+    Zoom = change in wrist-to-wrist distance vs. baseline.
+    Pan  = change in wrist-centroid position vs. baseline.
+    Baselines reset after each action so gestures feel incremental."""
+    global _atelier_baseline_dist, _atelier_baseline_cx, _atelier_baseline_cy
+    global _atelier_last_action_at
+    if not _atelier_mode:
+        return None
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        # Drop baselines so we don't snap on re-acquire.
+        _atelier_baseline_dist = None
+        _atelier_baseline_cx = None
+        _atelier_baseline_cy = None
+        return None
+    h1, h2 = hands_lm_list[0], hands_lm_list[1]
+    w1 = h1[0]; w2 = h2[0]
+    dist = math.hypot(w1.x - w2.x, w1.y - w2.y)
+    cx = (w1.x + w2.x) / 2
+    cy = (w1.y + w2.y) / 2
+    if _atelier_baseline_dist is None:
+        _atelier_baseline_dist = dist
+        _atelier_baseline_cx = cx
+        _atelier_baseline_cy = cy
+        return None
+    if now - _atelier_last_action_at < ATELIER_ACTION_COOLDOWN_S:
+        return None
+    ddist = dist - _atelier_baseline_dist
+    dcx   = cx   - _atelier_baseline_cx
+    dcy   = cy   - _atelier_baseline_cy
+    # Zoom takes priority when distance change dominates.
+    if abs(ddist) > ATELIER_ZOOM_DELTA and abs(ddist) > max(abs(dcx), abs(dcy)):
+        action = "zoom_in" if ddist > 0 else "zoom_out"
+        _atelier_baseline_dist = dist
+        _atelier_baseline_cx = cx
+        _atelier_baseline_cy = cy
+        _atelier_last_action_at = now
+        return action
+    if abs(dcx) > ATELIER_PAN_DELTA and abs(dcx) > abs(dcy):
+        # Camera is mirrored in the UI. Moving image-right = user's right hand
+        # goes left in screen space — but users sweep toward the direction
+        # they want the canvas to travel. Flip sign so pan matches intent.
+        action = "pan_left" if dcx > 0 else "pan_right"
+        _atelier_baseline_dist = dist
+        _atelier_baseline_cx = cx
+        _atelier_baseline_cy = cy
+        _atelier_last_action_at = now
+        return action
+    if abs(dcy) > ATELIER_PAN_DELTA:
+        action = "pan_down" if dcy > 0 else "pan_up"
+        _atelier_baseline_dist = dist
+        _atelier_baseline_cx = cx
+        _atelier_baseline_cy = cy
+        _atelier_last_action_at = now
+        return action
+    return None
+
+
+def _atelier_fire(action: str) -> None:
+    """Turn an atelier action label into real Figma input.
+    - zoom: Cmd+= / Cmd+- (works in Figma + most apps)
+    - pan : mouse scroll (Figma pans on wheel scroll)
+    """
+    try:
+        if action == "zoom_in":
+            _fire_hotkey("cmd+=")
+        elif action == "zoom_out":
+            _fire_hotkey("cmd+-")
+        elif action == "pan_left":
+            pyautogui.hscroll(-8, _pause=False)
+        elif action == "pan_right":
+            pyautogui.hscroll(8, _pause=False)
+        elif action == "pan_up":
+            pyautogui.scroll(5, _pause=False)
+        elif action == "pan_down":
+            pyautogui.scroll(-5, _pause=False)
+    except Exception as e:
+        print(f"[viewer] atelier fire {action} failed: {e}", flush=True)
+
+
 def _finger_extended(hand, tip_idx: int, pip_idx: int) -> bool:
     """True if the fingertip is meaningfully farther from the wrist than
     the PIP joint — a reliable extension check that works at any hand angle."""
@@ -5136,6 +5356,31 @@ def _capture_loop() -> None:
         if _t_timeout_enabled and _detect_t_gesture(hands_lm_list, now):
             print("[viewer] T-gesture → master toggle", flush=True)
             _set_master(not _system_enabled, source="t-gesture")
+        # ✨ A-pose → atelier mode toggle
+        atelier_toggled = False
+        if _atelier_enabled and _detect_a_pose(hands_lm_list, now):
+            global _atelier_mode, _atelier_baseline_dist
+            global _atelier_baseline_cx, _atelier_baseline_cy
+            _atelier_mode = not _atelier_mode
+            _atelier_baseline_dist = None
+            _atelier_baseline_cx = None
+            _atelier_baseline_cy = None
+            atelier_toggled = True
+            print(f"[viewer] ✨ atelier mode = "
+                  f"{'ON' if _atelier_mode else 'off'}", flush=True)
+            with _state_lock:
+                global _atelier_toggle_pending
+                _atelier_toggle_pending = True
+        # While atelier is ON, two-hand geometry drives zoom + pan.
+        atelier_action = None
+        if _atelier_mode and _system_enabled:
+            atelier_action = _update_atelier(hands_lm_list, now)
+            if atelier_action is not None:
+                _atelier_fire(atelier_action)
+                print(f"[viewer] atelier {atelier_action}", flush=True)
+                with _state_lock:
+                    global _atelier_action_pending
+                    _atelier_action_pending = atelier_action
         # Peace sign ✌️ → right-click
         if (_peace_rclick_enabled and _system_enabled
                 and _detect_peace_rclick(hands_lm_list, now)):
@@ -5928,6 +6173,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
                 )
                 return
+            if action == "atelier":
+                # Toggle the feature ENABLE (gesture detection). The mode
+                # itself is entered/exited by doing the A-pose.
+                global _atelier_enabled, _atelier_armed
+                _atelier_enabled = bool(data.get("on"))
+                _atelier_armed = True
+                print(f"[viewer] atelier feature = {_atelier_enabled}",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "atelierEnabled": _atelier_enabled}).encode(),
+                )
+                return
+            if action == "atelier_force":
+                # Manual mode toggle from UI (emergency exit without pose).
+                global _atelier_mode
+                _atelier_mode = bool(data.get("on"))
+                print(f"[viewer] atelier mode (forced) = {_atelier_mode}",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "atelierMode": _atelier_mode}).encode(),
+                )
+                return
             if action == "release_extra_tap":
                 global _wispr_release_extra_tap
                 _wispr_release_extra_tap = bool(data.get("on"))
@@ -6117,6 +6388,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     global _prayer_start_pending, _prayer_end_pending
                     global _boot_pending, _swipe_pending, _dictation_pending
                     global _clap_tick_pending
+                    global _atelier_toggle_pending, _atelier_action_pending
                     with _state_lock:
                         bob = _bob_pending
                         blink = _blink_pending
@@ -6126,6 +6398,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         clap_tick = _clap_tick_pending
                         swipe = _swipe_pending
                         dictation = _dictation_pending
+                        atelier_toggle = _atelier_toggle_pending
+                        atelier_action = _atelier_action_pending
                         _bob_pending = False
                         _blink_pending = False
                         _prayer_start_pending = False
@@ -6134,6 +6408,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         _clap_tick_pending = False
                         _swipe_pending = None
                         _dictation_pending = False
+                        _atelier_toggle_pending = False
+                        _atelier_action_pending = None
                         smile = _smile_val
                         l_y = _left_hand_y
                         r_y = _right_hand_y
@@ -6166,6 +6442,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
+                        "atelierEnabled": _atelier_enabled,
+                        "atelierMode": _atelier_mode,
                         "releaseExtraTap": _wispr_release_extra_tap,
                         "releaseNuclear": _wispr_release_nuclear,
                         "scrollGesture": _scroll_gesture_enabled,
@@ -6190,6 +6468,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if clap_tick: payload["clapTick"] = True
                     if swipe: payload["swipe"] = swipe
                     if dictation: payload["dictation"] = True
+                    if atelier_toggle: payload["atelierToggled"] = True
+                    if atelier_action: payload["atelierAction"] = atelier_action
                     line = f"data: {json.dumps(payload)}\n\n"
                     try:
                         self.wfile.write(line.encode("utf-8"))
