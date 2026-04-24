@@ -912,7 +912,8 @@ HTML = """<!doctype html>
       <div class="cc-label">tab swipe</div>
       <div class="cc-opts" id="cc-tabswipe-opts">
         <button class="cc-opt" data-v="off">off</button>
-        <button class="cc-opt" data-v="on">on</button>
+        <button class="cc-opt" data-v="tabs" title="Two hands raised + sweep → Cmd+Shift+]/[ (switch browser tabs)">tabs</button>
+        <button class="cc-opt" data-v="spaces" title="Two hands raised + sweep → Ctrl+Left/Right (switch macOS Spaces, like 3-finger swipe)">spaces (3-finger)</button>
       </div>
     </div>
     <div class="cc-row">
@@ -2008,7 +2009,7 @@ HTML = """<!doctype html>
     fetch('/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'tab_swipe', on: b.dataset.v === 'on' }),
+      body: JSON.stringify({ action: 'tab_swipe', on: b.dataset.v }),
     }).catch(() => {});
   });
 
@@ -2649,7 +2650,10 @@ HTML = """<!doctype html>
         paintActive(ccScroll, msg.scrollSens);
       }
       if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
-      if ('tabSwipe' in msg) paintActive(ccTabSwipe, msg.tabSwipe ? 'on' : 'off');
+      if ('tabSwipe' in msg || 'tabSwipeAction' in msg) {
+        const v = msg.tabSwipe ? (msg.tabSwipeAction || 'tabs') : 'off';
+        paintActive(ccTabSwipe, v);
+      }
       if ('voiceDaemon' in msg) {
         paintActive(ccVoiceDaemon, msg.voiceDaemon ? 'on' : 'off');
         const logEl = document.getElementById('cc-voice-log');
@@ -3198,6 +3202,12 @@ TAB_SWIPE_Y_MAX = 0.60
 TAB_SWIPE_COOLDOWN_S = 1.0
 TAB_SWIPE_NEXT_COMBO = "cmd+shift+]"
 TAB_SWIPE_PREV_COMBO = "cmd+shift+["
+# macOS "Move between Spaces" shortcuts (built-in). Same feel as a
+# three-finger trackpad swipe.
+SPACE_SWIPE_NEXT_COMBO = "ctrl+right"
+SPACE_SWIPE_PREV_COMBO = "ctrl+left"
+# "tabs" → browser tabs, "spaces" → macOS Spaces, "off" → disabled.
+_tab_swipe_action: str = "spaces"
 _tab_swipe_hist: Deque[tuple] = deque(maxlen=60)
 _last_tab_swipe_at: float = 0.0
 _tab_swipe_enabled: bool = True
@@ -5114,10 +5124,15 @@ def _capture_loop() -> None:
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
-            combo = (TAB_SWIPE_NEXT_COMBO if tab_dir == "next"
-                     else TAB_SWIPE_PREV_COMBO)
+            if _tab_swipe_action == "spaces":
+                combo = (SPACE_SWIPE_NEXT_COMBO if tab_dir == "next"
+                         else SPACE_SWIPE_PREV_COMBO)
+            else:
+                combo = (TAB_SWIPE_NEXT_COMBO if tab_dir == "next"
+                         else TAB_SWIPE_PREV_COMBO)
             _fire_hotkey(combo)
-            print(f"[viewer] tab swipe {tab_dir} → {combo}", flush=True)
+            print(f"[viewer] swipe {tab_dir} ({_tab_swipe_action}) → "
+                  f"{combo}", flush=True)
             with _state_lock:
                 _swipe_pending = f"tab-{tab_dir}"
         if _scroll_mode == "fist":
@@ -5773,17 +5788,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
                 return
             if action == "tab_swipe":
-                global _tab_swipe_enabled
+                global _tab_swipe_enabled, _tab_swipe_action
                 v = data.get("on")
-                if isinstance(v, bool):
+                # Accept new action strings ("tabs"/"spaces"/"off") as well
+                # as legacy bool / "on"/"off".
+                if v in ("tabs", "spaces"):
+                    _tab_swipe_action = v
+                    _tab_swipe_enabled = True
+                elif v == "off":
+                    _tab_swipe_enabled = False
+                elif isinstance(v, bool):
                     _tab_swipe_enabled = v
-                elif v in ("on", "off"):
-                    _tab_swipe_enabled = (v == "on")
+                elif v == "on":
+                    _tab_swipe_enabled = True
                 print(f"[viewer] tab swipe = "
-                      f"{'ON' if _tab_swipe_enabled else 'OFF'}", flush=True)
+                      f"{('ON:' + _tab_swipe_action) if _tab_swipe_enabled else 'OFF'}",
+                      flush=True)
                 self._write_status(
                     200, "application/json",
-                    json.dumps({"ok": True, "tabSwipe": _tab_swipe_enabled}).encode(),
+                    json.dumps({
+                        "ok": True,
+                        "tabSwipe": _tab_swipe_enabled,
+                        "tabSwipeAction": _tab_swipe_action,
+                    }).encode(),
                 )
                 return
             if action == "swipe_gesture":
@@ -6113,6 +6140,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
                         "tabSwipe": _tab_swipe_enabled,
+                        "tabSwipeAction": _tab_swipe_action,
                         "clapPreset": _clap_preset,
                         "dictGesture": _dict_gesture,
                         "dictMode": _dict_mode,
