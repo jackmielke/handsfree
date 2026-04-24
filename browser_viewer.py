@@ -40,12 +40,23 @@ from mediapipe.tasks.python import vision as mp_vision
 try:
     from Quartz import (
         CGEventCreateKeyboardEvent,
+        CGEventCreateMouseEvent,
         CGEventPost,
         CGEventSetFlags,
+        CGWarpMouseCursorPosition,
+        CGAssociateMouseAndMouseCursorPosition,
         kCGEventFlagMaskSecondaryFn,
+        kCGEventMouseMoved,
         kCGHIDEventTap,
+        kCGMouseButtonLeft,
     )
     _QUARTZ_OK = True
+    # Re-associate OS cursor with the mouse so warp placements aren't
+    # de-coupled from input. Safe/idempotent.
+    try:
+        CGAssociateMouseAndMouseCursorPosition(True)
+    except Exception:
+        pass
 except Exception as _e:  # pragma: no cover
     print(f"[viewer] Quartz import failed: {_e}", flush=True)
     _QUARTZ_OK = False
@@ -3336,6 +3347,31 @@ _cur_x = (_virt_x0 + _virt_x1) * 0.5
 _cur_y = (_virt_y0 + _virt_y1) * 0.5
 
 
+def _move_cursor_virtual(x: float, y: float) -> None:
+    """Move the cursor to (x, y) in the FULL virtual-desktop coord space.
+    pyautogui.moveTo uses CGEventPost which gets clamped to the primary
+    display on macOS — so with multiple monitors the cursor gets stuck
+    on the main screen. CGWarpMouseCursorPosition places the cursor at
+    absolute virtual coords (supports negative x/y, >primary_w, etc.),
+    and we also post a mouseMoved event so apps see hover updates."""
+    if _QUARTZ_OK:
+        try:
+            CGWarpMouseCursorPosition((float(x), float(y)))
+            ev = CGEventCreateMouseEvent(
+                None, kCGEventMouseMoved,
+                (float(x), float(y)), kCGMouseButtonLeft,
+            )
+            CGEventPost(kCGHIDEventTap, ev)
+            return
+        except Exception as e:
+            print(f"[viewer] CG move failed, fallback pyautogui: {e}",
+                  flush=True)
+    try:
+        pyautogui.moveTo(x, y, _pause=False)
+    except Exception:
+        pass
+
+
 def _matrix_to_yaw_pitch(matrix) -> tuple:
     r = np.array(matrix).reshape(4, 4)[:3, :3]
     sy = float(np.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2))
@@ -4922,12 +4958,7 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
         ty = max(_virt_y0 + 2.0, min(_virt_y1 - 2.0, target[1]))
         _cur_x += (tx - _cur_x) * CURSOR_SMOOTHING
         _cur_y += (ty - _cur_y) * CURSOR_SMOOTHING
-        try:
-            pyautogui.moveTo(_cur_x, _cur_y, _pause=False)
-        except pyautogui.FailSafeException:
-            _cursor_enabled = False
-            print("[viewer] failsafe → cursor OFF", flush=True)
-            return ""
+        _move_cursor_virtual(_cur_x, _cur_y)
 
     # ---- click ------------------------------------------------------------
     primary = False
