@@ -747,10 +747,14 @@ HTML = """<!doctype html>
       <div class="cc-label">wispr</div>
       <div class="cc-opts" id="cc-wispr-opts">
         <button class="cc-opt" data-v="off">off</button>
-        <button class="cc-opt" data-v="cgevent_f19">cgevent f19</button>
-        <button class="cc-opt" data-v="cgevent_fn">cgevent fn</button>
+        <button class="cc-opt" data-v="cgevent_f19" title="Single F19 press — bind F19 in Wispr as your hotkey">cgevent f19</button>
+        <button class="cc-opt" data-v="cgevent_fn" title="Synthetic Fn key — only works on some macOS versions">cgevent fn</button>
+        <button class="cc-opt" data-v="double_tap_f19" title="Double-tap F19 — use with Wispr 'double-tap to toggle' mode">dbl-tap f19</button>
+        <button class="cc-opt" data-v="double_tap_fn" title="Double-tap synthetic Fn — latches Wispr if it listens">dbl-tap fn</button>
+        <button class="cc-opt" data-v="menu_click" title="Click Wispr menu bar icon via AppleScript — universal fallback">menu click</button>
         <button class="cc-opt" data-v="applescript_fn">applescript fn</button>
         <button class="cc-opt" data-v="apple_dictation">apple dictation</button>
+        <button class="cc-opt" data-v="all" title="Fire every method in sequence — great for diagnosing which one works">all (test)</button>
         <button class="cc-opt" id="cc-wispr-fire">tap now</button>
         <button class="cc-opt" id="cc-wispr-holdtest">hold 2s test</button>
       </div>
@@ -3659,6 +3663,61 @@ def _tap_apple_dictation() -> None:
         print(f"[viewer] apple dictation failed: {e}", flush=True)
 
 
+def _double_tap_cgevent(keycode: int, fn_flag: bool = False,
+                        gap_s: float = 0.08) -> None:
+    """Rapid double-tap via CGEvent — triggers any app set up with
+    'double-tap to toggle' for that key."""
+    if not _QUARTZ_OK:
+        return
+    for _ in range(2):
+        try:
+            down = CGEventCreateKeyboardEvent(None, keycode, True)
+            up   = CGEventCreateKeyboardEvent(None, keycode, False)
+            if fn_flag:
+                CGEventSetFlags(down, kCGEventFlagMaskSecondaryFn)
+                CGEventSetFlags(up,   kCGEventFlagMaskSecondaryFn)
+            CGEventPost(kCGHIDEventTap, down)
+            CGEventPost(kCGHIDEventTap, up)
+        except Exception as e:
+            print(f"[viewer] double-tap failed: {e}", flush=True)
+            return
+        time.sleep(gap_s)
+    print(f"[viewer] wispr double-tap (key={keycode} fn={fn_flag})", flush=True)
+
+
+def _tap_wispr_menu_click() -> None:
+    """Toggle Wispr Flow by clicking its menu bar icon via System Events.
+    Works without any keyboard-injection layer — needs Accessibility
+    permission for the process running handsfree. Universal fallback."""
+    script = '''
+tell application "System Events"
+  if exists (process "Wispr Flow") then
+    tell process "Wispr Flow"
+      try
+        click menu bar item 1 of menu bar 2
+        return "clicked menu bar 2 item 1"
+      on error
+        try
+          click menu bar item 1 of menu bar 1
+          return "clicked menu bar 1 item 1"
+        end try
+      end try
+    end tell
+  else
+    return "Wispr Flow not running"
+  end if
+end tell
+'''
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           check=False, timeout=1.5,
+                           capture_output=True, text=True)
+        out = (r.stdout or r.stderr or "").strip()
+        print(f"[viewer] wispr menu click: {out}", flush=True)
+    except Exception as e:
+        print(f"[viewer] wispr menu click failed: {e}", flush=True)
+
+
 def _tap_wispr_hotkey() -> None:
     """Dispatch on `_wispr_method`. 'all' fires each variant on a
     background thread with short gaps so we don't stall the capture loop."""
@@ -3671,15 +3730,27 @@ def _tap_wispr_hotkey() -> None:
         _tap_wispr_cgevent(80, fn_flag=False)
     elif method == "cgevent_fn":
         _tap_wispr_cgevent(63, fn_flag=True)
+    elif method == "double_tap_f19":
+        _double_tap_cgevent(80, fn_flag=False)
+    elif method == "double_tap_fn":
+        _double_tap_cgevent(63, fn_flag=True)
+    elif method == "menu_click":
+        _tap_wispr_menu_click()
     elif method == "apple_dictation":
         _tap_apple_dictation()
     elif method == "all":
         def _fire_all():
             _tap_wispr_cgevent(80, fn_flag=False)
             time.sleep(0.2)
+            _double_tap_cgevent(80, fn_flag=False)
+            time.sleep(0.2)
             _tap_wispr_cgevent(63, fn_flag=True)
             time.sleep(0.2)
+            _double_tap_cgevent(63, fn_flag=True)
+            time.sleep(0.2)
             _tap_wispr_applescript_fn()
+            time.sleep(0.2)
+            _tap_wispr_menu_click()
         threading.Thread(target=_fire_all, daemon=True).start()
     else:
         _tap_wispr_cgevent(WISPR_KEYCODE, fn_flag=WISPR_USE_FN_FLAG)
@@ -5354,7 +5425,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "wispr_method":
                 method = data.get("method")
                 if method in ("applescript_fn", "cgevent_f19",
-                              "cgevent_fn", "all", "apple_dictation", "off"):
+                              "cgevent_fn", "double_tap_f19",
+                              "double_tap_fn", "menu_click",
+                              "all", "apple_dictation", "off"):
                     _wispr_method = method
                 print(f"[viewer] wispr method = {_wispr_method}", flush=True)
                 self._write_status(
