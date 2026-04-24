@@ -1915,6 +1915,58 @@ HTML = """<!doctype html>
     });
   }
 
+  // ✨ Atelier sound: synthesized chord via Web Audio. No asset file needed.
+  // Call atelierSound(true) on enter, atelierSound(false) on exit.
+  let _audioCtx = null;
+  function _ac() {
+    if (!_audioCtx) {
+      try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { return null; }
+    }
+    // Some browsers suspend until a user gesture — try to resume.
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
+    return _audioCtx;
+  }
+  function atelierSound(on) {
+    const ctx = _ac(); if (!ctx) return;
+    const now = ctx.currentTime;
+    // Arpeggiated chord: A minor → C major feel depending on direction.
+    const notes = on
+      ? [440, 659.25, 880, 1318.5]        // A4 E5 A5 E6 (rising, bright)
+      : [880, 659.25, 523.25, 392.0];      // A5 E5 C5 G4 (falling, gentle)
+    notes.forEach((f, i) => {
+      const t = now + i * (on ? 0.06 : 0.08);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = on ? 'triangle' : 'sine';
+      osc.frequency.value = f;
+      // Quick attack, gentle decay. Extra quiet overall.
+      gain.gain.setValueAtTime(0.0, t);
+      gain.gain.linearRampToValueAtTime(on ? 0.16 : 0.10, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + (on ? 0.35 : 0.45));
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + (on ? 0.4 : 0.5));
+    });
+    // Shimmer: a soft noise burst on enter for sparkle.
+    if (on) {
+      try {
+        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.25, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) {
+          data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3);
+        }
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass'; hp.frequency.value = 4000;
+        const g = ctx.createGain(); g.gain.value = 0.06;
+        src.connect(hp).connect(g).connect(ctx.destination);
+        src.start(now);
+      } catch (e) {}
+    }
+  }
+
   // ✨ Atelier toast — flashes when the mode toggles on or off.
   function atelierToast(on) {
     const t = document.createElement('div');
@@ -2791,7 +2843,9 @@ HTML = """<!doctype html>
       }
       if (msg.atelierToggled) {
         const pill = document.getElementById('atelier-pill');
-        atelierToast(pill && pill.style.display !== 'none');
+        const on = pill && pill.style.display !== 'none';
+        atelierToast(on);
+        atelierSound(on);
       }
       if (msg.atelierAction) atelierActionFlash(msg.atelierAction);
       if ('releaseExtraTap' in msg) {
@@ -3257,6 +3311,17 @@ _atelier_last_action_at: float = 0.0
 ATELIER_ACTION_COOLDOWN_S: float = 0.08
 ATELIER_ZOOM_DELTA: float = 0.035    # wrist-dist change to trigger zoom step
 ATELIER_PAN_DELTA: float = 0.025     # centroid change to trigger pan step
+# Head dolly zoom — face size (eye-corner span) vs baseline. Leaning in
+# shrinks the camera-to-face distance so eye span grows.
+_atelier_face_baseline: Optional[float] = None
+ATELIER_FACE_ZOOM_DELTA: float = 0.015
+ATELIER_FACE_COOLDOWN_S: float = 0.22
+_atelier_face_last_at: float = 0.0
+# Pinch-to-grab: while atelier is on, pinching (thumb+index together)
+# = mouseDown; releasing = mouseUp. Drag anything.
+_atelier_pinch_down: bool = False
+ATELIER_PINCH_ON_THR: float = 0.045
+ATELIER_PINCH_OFF_THR: float = 0.075
 
 GESTURE_COOLDOWN_S: float = 1.0
 # Pending-click mechanism so two primaries within DOUBLE_WINDOW_S merge into
@@ -5020,6 +5085,93 @@ def _update_atelier(hands_lm_list, now: float) -> Optional[str]:
     return None
 
 
+def _face_size_proxy(face_landmarks) -> Optional[float]:
+    """Return a size-proxy for the face (outer-eye-corner span). Grows as
+    the user leans toward the camera — used for head-dolly zoom."""
+    if face_landmarks is None or len(face_landmarks) < 264:
+        return None
+    try:
+        a = face_landmarks[33]   # right eye outer corner
+        b = face_landmarks[263]  # left eye outer corner
+        return math.hypot(a.x - b.x, a.y - b.y)
+    except Exception:
+        return None
+
+
+def _update_atelier_head_zoom(face_landmarks, now: float) -> Optional[str]:
+    """Head-dolly zoom: when face grows (user leans in) fire zoom-in;
+    when it shrinks (leans back) fire zoom-out. Baseline resets after
+    each action so the gesture feels incremental."""
+    global _atelier_face_baseline, _atelier_face_last_at
+    if not _atelier_mode:
+        return None
+    size = _face_size_proxy(face_landmarks)
+    if size is None:
+        _atelier_face_baseline = None
+        return None
+    if _atelier_face_baseline is None:
+        _atelier_face_baseline = size
+        return None
+    if now - _atelier_face_last_at < ATELIER_FACE_COOLDOWN_S:
+        return None
+    d = size - _atelier_face_baseline
+    if abs(d) < ATELIER_FACE_ZOOM_DELTA:
+        return None
+    action = "zoom_in" if d > 0 else "zoom_out"
+    _atelier_face_baseline = size
+    _atelier_face_last_at = now
+    return action
+
+
+def _update_atelier_pinch_grab(hands_lm_list) -> Optional[str]:
+    """Pinch-and-drag inside atelier mode. Thumb tip (4) ↔ index tip (8)
+    close → mouseDown. Release → mouseUp. Returns event label for feedback."""
+    global _atelier_pinch_down
+    if not _atelier_mode:
+        if _atelier_pinch_down:
+            try:
+                pyautogui.mouseUp(_pause=False)
+            except Exception:
+                pass
+            _atelier_pinch_down = False
+        return None
+    if not hands_lm_list:
+        if _atelier_pinch_down:
+            try:
+                pyautogui.mouseUp(_pause=False)
+            except Exception:
+                pass
+            _atelier_pinch_down = False
+            return "drop"
+        return None
+    # Use closest (smallest pinch-dist) hand so either hand can grab.
+    best = None
+    for h in hands_lm_list:
+        try:
+            d = math.hypot(h[4].x - h[8].x, h[4].y - h[8].y)
+            if best is None or d < best:
+                best = d
+        except Exception:
+            continue
+    if best is None:
+        return None
+    if not _atelier_pinch_down and best < ATELIER_PINCH_ON_THR:
+        try:
+            pyautogui.mouseDown(_pause=False)
+            _atelier_pinch_down = True
+            return "grab"
+        except Exception as e:
+            print(f"[viewer] atelier grab failed: {e}", flush=True)
+    elif _atelier_pinch_down and best > ATELIER_PINCH_OFF_THR:
+        try:
+            pyautogui.mouseUp(_pause=False)
+            _atelier_pinch_down = False
+            return "drop"
+        except Exception as e:
+            print(f"[viewer] atelier drop failed: {e}", flush=True)
+    return None
+
+
 def _atelier_fire(action: str) -> None:
     """Turn an atelier action label into real Figma input.
     - zoom: Cmd+= / Cmd+- (works in Figma + most apps)
@@ -5230,6 +5382,9 @@ def _capture_loop() -> None:
     global _clap_tick_pending
     global _swipe_pending, _left_hand_y, _right_hand_y
     global _left_hand_x, _right_hand_x, _system_enabled
+    global _atelier_mode, _atelier_baseline_dist
+    global _atelier_baseline_cx, _atelier_baseline_cy
+    global _atelier_toggle_pending, _atelier_action_pending
     cam = Camera()
     for _ in range(30):
         ok, _ = cam.read()
@@ -5299,6 +5454,7 @@ def _capture_loop() -> None:
             _click_method != "off"
             or _right_click_method != "off"
             or _pointing_method == "head"
+            or _atelier_mode  # head-dolly zoom needs face landmarks
         )
         need_hand = (
             _pointing_method == "finger"
@@ -5310,12 +5466,14 @@ def _capture_loop() -> None:
         face_nose = None
         face_blendshapes = None
         face_matrix = None
+        face_landmarks_lm = None  # full landmark list for modules needing it
         fres = None
         if face_landmarker is not None and need_face:
             try:
                 fres = face_landmarker.detect_for_video(mp_img, ts_ms)
                 if fres.face_landmarks:
                     lm = fres.face_landmarks[0]
+                    face_landmarks_lm = lm
                     _draw_face_landmarks(frame, lm)
                     face_nose = (lm[1].x, lm[1].y)  # nose tip
                 if fres.face_blendshapes:
@@ -5359,8 +5517,6 @@ def _capture_loop() -> None:
         # ✨ A-pose → atelier mode toggle
         atelier_toggled = False
         if _atelier_enabled and _detect_a_pose(hands_lm_list, now):
-            global _atelier_mode, _atelier_baseline_dist
-            global _atelier_baseline_cx, _atelier_baseline_cy
             _atelier_mode = not _atelier_mode
             _atelier_baseline_dist = None
             _atelier_baseline_cx = None
@@ -5369,18 +5525,29 @@ def _capture_loop() -> None:
             print(f"[viewer] ✨ atelier mode = "
                   f"{'ON' if _atelier_mode else 'off'}", flush=True)
             with _state_lock:
-                global _atelier_toggle_pending
                 _atelier_toggle_pending = True
-        # While atelier is ON, two-hand geometry drives zoom + pan.
+        # While atelier is ON, two-hand geometry drives zoom + pan, the
+        # head leans drive head-dolly zoom, and pinching = grab-and-drag.
         atelier_action = None
         if _atelier_mode and _system_enabled:
             atelier_action = _update_atelier(hands_lm_list, now)
+            if atelier_action is None:
+                atelier_action = _update_atelier_head_zoom(
+                    face_landmarks_lm, now,
+                )
             if atelier_action is not None:
                 _atelier_fire(atelier_action)
                 print(f"[viewer] atelier {atelier_action}", flush=True)
                 with _state_lock:
-                    global _atelier_action_pending
                     _atelier_action_pending = atelier_action
+            grab_evt = _update_atelier_pinch_grab(hands_lm_list)
+            if grab_evt is not None:
+                print(f"[viewer] atelier {grab_evt}", flush=True)
+                with _state_lock:
+                    _atelier_action_pending = grab_evt
+        else:
+            # Safety: release any held mouse if we exited atelier mid-grab.
+            _update_atelier_pinch_grab(hands_lm_list)
         # Peace sign ✌️ → right-click
         if (_peace_rclick_enabled and _system_enabled
                 and _detect_peace_rclick(hands_lm_list, now)):
