@@ -743,9 +743,37 @@ HTML = """<!doctype html>
           title="Pray = hold Fn (keycode 63). Original method. Works sometimes.">
           pray → hold (Fn)
         </button>
+        <button class="cc-opt" data-preset="fn_tap_toggle"
+          title="Pray = single Fn tap to toggle. If Wispr treats Fn as on/off, this starts+stops cleanly.">
+          pray → tap (Fn)
+        </button>
+        <button class="cc-opt" data-preset="fn_double_toggle"
+          title="Pray = double-tap Fn. Needs Wispr 'double-tap to toggle'.">
+          pray → toggle (Fn×2)
+        </button>
+        <button class="cc-opt" data-preset="fn_hold_tap"
+          title="Pray = hold Fn + extra Fn tap when hands release. Force-stops toggle-style apps.">
+          pray → hold+tap (Fn)
+        </button>
         <button class="cc-opt" data-preset="off"
           title="Disable prayer → Wispr entirely">
           off
+        </button>
+      </div>
+    </div>
+    <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
+      <div class="cc-label" style="color:#fbbf24;">🧪 Fn lab</div>
+      <div class="cc-opts" id="cc-fn-diag-opts">
+        <button class="cc-opt" data-sub="tap" title="Single Fn tap (keycode 63 + Fn flag)">tap</button>
+        <button class="cc-opt" data-sub="double" title="Double Fn tap">double</button>
+        <button class="cc-opt" data-sub="triple" title="Triple Fn tap">triple</button>
+        <button class="cc-opt" data-sub="hold_500ms" title="Hold Fn for 500ms">hold 500ms</button>
+        <button class="cc-opt" data-sub="hold_2s" title="Hold Fn for 2s">hold 2s</button>
+        <button class="cc-opt" data-sub="down" title="Fn DOWN only (no up)">down</button>
+        <button class="cc-opt" data-sub="up" title="Fn UP only">up</button>
+        <button class="cc-opt" id="cc-fn-release-tap" data-toggle="release_extra_tap"
+          title="When 'hold' releases, also fire an extra Fn tap to force-stop toggle-style apps">
+          release+tap
         </button>
       </div>
     </div>
@@ -1742,7 +1770,10 @@ HTML = """<!doctype html>
     menu_toggle:       { gesture: 'prayer', mode: 'latch', method: 'menu_click' },
     f19_double_toggle: { gesture: 'prayer', mode: 'latch', method: 'double_tap_f19' },
     f19_hold:          { gesture: 'prayer', mode: 'hold',  method: 'cgevent_f19' },
-    fn_hold:           { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn' },
+    fn_hold:           { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn',    extraTap: false },
+    fn_tap_toggle:     { gesture: 'prayer', mode: 'latch', method: 'cgevent_fn' },
+    fn_double_toggle: { gesture: 'prayer', mode: 'latch', method: 'double_tap_fn' },
+    fn_hold_tap:       { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn',    extraTap: true  },
     off:               { gesture: 'off',    mode: 'hold',  method: 'off' },
   };
   function paintWisprPreset(key) {
@@ -1767,7 +1798,36 @@ HTML = """<!doctype html>
         await fetch('/command', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'wispr_method', method: p.method }) });
+        if ('extraTap' in p) {
+          await fetch('/command', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'release_extra_tap', on: !!p.extraTap }) });
+        }
       } catch {}
+    });
+  }
+  // Fn diagnostic lab — manual one-shot probes + release-extra-tap toggle.
+  const ccFnDiag = document.getElementById('cc-fn-diag-opts');
+  if (ccFnDiag) {
+    ccFnDiag.addEventListener('click', (e) => {
+      const b = e.target.closest('.cc-opt'); if (!b) return;
+      if (b.dataset.toggle === 'release_extra_tap') {
+        const turnOn = !b.classList.contains('on');
+        b.classList.toggle('on', turnOn);
+        fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'release_extra_tap', on: turnOn }),
+        }).catch(() => {});
+        return;
+      }
+      const sub = b.dataset.sub; if (!sub) return;
+      // Flash the button briefly so the user knows it fired.
+      b.classList.add('on');
+      setTimeout(() => b.classList.remove('on'), 180);
+      fetch('/command', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'fn_diag', sub }),
+      }).catch(() => {});
     });
   }
   // Keep the preset row synced with whatever combo the server reports.
@@ -1776,7 +1836,9 @@ HTML = """<!doctype html>
     for (const [k, p] of Object.entries(WISPR_PRESETS)) {
       if (p.gesture === state.dictGesture
           && p.mode === state.dictMode
-          && p.method === state.wispr) {
+          && p.method === state.wispr
+          && (!('extraTap' in p)
+              || !!p.extraTap === !!state.releaseExtraTap)) {
         paintWisprPreset(k); return;
       }
     }
@@ -2623,6 +2685,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="thumbs_dclick"]');
         if (b) b.classList.toggle('on', !!msg.thumbsDclick);
       }
+      if ('releaseExtraTap' in msg) {
+        const b = document.getElementById('cc-fn-release-tap');
+        if (b) b.classList.toggle('on', !!msg.releaseExtraTap);
+      }
       if (msg.clapTick) {
         clapCount += 1;
         const ci = document.getElementById('cc-clap-indicator');
@@ -3010,6 +3076,9 @@ _cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
 _double_click_on: bool = False    # double-tap primary within DBL window → double-click
 _wispr_method: str = "off"  # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|"apple_dictation"|"off"
+# If True: after releasing a held Fn key, also fire a fresh tap. Useful when
+# Wispr treats Fn as a toggle and the key-up alone doesn't stop recording.
+_wispr_release_extra_tap: bool = False
 
 # Calibration centers (captured on cursor enable, per method).
 _finger_center: Optional[tuple] = None   # (fx, fy) in [0..1]
@@ -3795,6 +3864,46 @@ end tell
         print(f"[viewer] wispr menu click failed: {e}", flush=True)
 
 
+def _triple_tap_cgevent(keycode: int, fn_flag: bool = False,
+                        gap_s: float = 0.08) -> None:
+    if not _QUARTZ_OK:
+        return
+    for _ in range(3):
+        try:
+            d = CGEventCreateKeyboardEvent(None, keycode, True)
+            u = CGEventCreateKeyboardEvent(None, keycode, False)
+            if fn_flag:
+                CGEventSetFlags(d, kCGEventFlagMaskSecondaryFn)
+                CGEventSetFlags(u, kCGEventFlagMaskSecondaryFn)
+            CGEventPost(kCGHIDEventTap, d)
+            CGEventPost(kCGHIDEventTap, u)
+        except Exception as e:
+            print(f"[viewer] triple-tap failed: {e}", flush=True)
+            return
+        time.sleep(gap_s)
+    print(f"[viewer] wispr triple-tap (key={keycode} fn={fn_flag})", flush=True)
+
+
+def _hold_cgevent_for(keycode: int, fn_flag: bool, hold_s: float) -> None:
+    """Press key, sleep hold_s, release key. Simulates a deliberate human hold."""
+    if not _QUARTZ_OK:
+        return
+    try:
+        d = CGEventCreateKeyboardEvent(None, keycode, True)
+        if fn_flag:
+            CGEventSetFlags(d, kCGEventFlagMaskSecondaryFn)
+        CGEventPost(kCGHIDEventTap, d)
+        time.sleep(hold_s)
+        u = CGEventCreateKeyboardEvent(None, keycode, False)
+        if fn_flag:
+            CGEventSetFlags(u, kCGEventFlagMaskSecondaryFn)
+        CGEventPost(kCGHIDEventTap, u)
+        print(f"[viewer] wispr hold {hold_s}s (key={keycode} fn={fn_flag})",
+              flush=True)
+    except Exception as e:
+        print(f"[viewer] hold-for failed: {e}", flush=True)
+
+
 def _tap_wispr_hotkey() -> None:
     """Dispatch on `_wispr_method`. 'all' fires each variant on a
     background thread with short gaps so we don't stall the capture loop."""
@@ -3811,6 +3920,8 @@ def _tap_wispr_hotkey() -> None:
         _double_tap_cgevent(80, fn_flag=False)
     elif method == "double_tap_fn":
         _double_tap_cgevent(63, fn_flag=True)
+    elif method == "triple_tap_fn":
+        _triple_tap_cgevent(63, fn_flag=True)
     elif method == "menu_click":
         _tap_wispr_menu_click()
     elif method == "apple_dictation":
@@ -3865,17 +3976,26 @@ def _press_wispr_key_down() -> None:
 
 
 def _release_wispr_key_up() -> None:
-    """Release the held wispr key. No-op if nothing is held."""
+    """Release the held wispr key. No-op if nothing is held.
+    If _wispr_release_extra_tap is on, we also fire a fresh tap after
+    the key-up — useful when the app treats the keydown as a toggle and
+    ignores the key-up, so we need a second tap to stop it."""
     global _held_keycode
     if _held_keycode is None or not _QUARTZ_OK:
         return
     try:
-        fn = (_held_keycode == 63)
-        up = CGEventCreateKeyboardEvent(None, _held_keycode, False)
+        kc = _held_keycode
+        fn = (kc == 63)
+        up = CGEventCreateKeyboardEvent(None, kc, False)
         if fn:
             CGEventSetFlags(up, kCGEventFlagMaskSecondaryFn)
         CGEventPost(kCGHIDEventTap, up)
-        print(f"[viewer] wispr HOLD up   key={_held_keycode}", flush=True)
+        print(f"[viewer] wispr HOLD up   key={kc}", flush=True)
+        if _wispr_release_extra_tap:
+            # Brief gap so the app processes the release before the new tap.
+            time.sleep(0.05)
+            _tap_wispr_cgevent(kc, fn_flag=fn)
+            print("[viewer] wispr HOLD + extra tap on release", flush=True)
     except Exception as e:
         print(f"[viewer] wispr hold-up failed: {e}", flush=True)
     finally:
@@ -5503,7 +5623,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 method = data.get("method")
                 if method in ("applescript_fn", "cgevent_f19",
                               "cgevent_fn", "double_tap_f19",
-                              "double_tap_fn", "menu_click",
+                              "double_tap_fn", "triple_tap_fn",
+                              "menu_click",
                               "all", "apple_dictation", "off"):
                     _wispr_method = method
                 print(f"[viewer] wispr method = {_wispr_method}", flush=True)
@@ -5673,6 +5794,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._write_status(
                     200, "application/json",
                     json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
+                )
+                return
+            if action == "release_extra_tap":
+                global _wispr_release_extra_tap
+                _wispr_release_extra_tap = bool(data.get("on"))
+                print(f"[viewer] wispr release-extra-tap = "
+                      f"{_wispr_release_extra_tap}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "releaseExtraTap": _wispr_release_extra_tap}).encode(),
+                )
+                return
+            if action == "fn_diag":
+                # Manual one-shot Fn-key probes for diagnosing which variant
+                # Wispr (or anything else) actually listens to. keycode 63 = Fn.
+                sub = (data.get("sub") or "").strip()
+                kc = 63
+                try:
+                    if sub == "tap":
+                        _tap_wispr_cgevent(kc, fn_flag=True)
+                    elif sub == "double":
+                        _double_tap_cgevent(kc, fn_flag=True)
+                    elif sub == "triple":
+                        _triple_tap_cgevent(kc, fn_flag=True)
+                    elif sub == "hold_500ms":
+                        threading.Thread(
+                            target=_hold_cgevent_for,
+                            args=(kc, True, 0.5), daemon=True).start()
+                    elif sub == "hold_2s":
+                        threading.Thread(
+                            target=_hold_cgevent_for,
+                            args=(kc, True, 2.0), daemon=True).start()
+                    elif sub == "down":
+                        if _QUARTZ_OK:
+                            d = CGEventCreateKeyboardEvent(None, kc, True)
+                            CGEventSetFlags(d, kCGEventFlagMaskSecondaryFn)
+                            CGEventPost(kCGHIDEventTap, d)
+                            print("[viewer] fn_diag: DOWN only", flush=True)
+                    elif sub == "up":
+                        if _QUARTZ_OK:
+                            u = CGEventCreateKeyboardEvent(None, kc, False)
+                            CGEventSetFlags(u, kCGEventFlagMaskSecondaryFn)
+                            CGEventPost(kCGHIDEventTap, u)
+                            print("[viewer] fn_diag: UP only", flush=True)
+                    print(f"[viewer] fn_diag {sub}", flush=True)
+                except Exception as e:
+                    print(f"[viewer] fn_diag failed: {e}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "sub": sub}).encode(),
                 )
                 return
             if action == "clap_preset":
@@ -5845,6 +6017,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
+                        "releaseExtraTap": _wispr_release_extra_tap,
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
                         "tabSwipe": _tab_swipe_enabled,
