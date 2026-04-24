@@ -755,6 +755,10 @@ HTML = """<!doctype html>
           title="Pray = hold Fn + extra Fn tap when hands release. Force-stops toggle-style apps.">
           pray → hold+tap (Fn)
         </button>
+        <button class="cc-opt" data-preset="fn_hold_nuclear"
+          title="Pray = hold Fn. On release fire EVERY stop signal: Fn-up, Fn-tap, Fn×2, F19, Escape, menu click. Use if nothing else stops Wispr.">
+          pray → hold+💣 (Fn)
+        </button>
         <button class="cc-opt" data-preset="off"
           title="Disable prayer → Wispr entirely">
           off
@@ -771,9 +775,16 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-sub="hold_2s" title="Hold Fn for 2s">hold 2s</button>
         <button class="cc-opt" data-sub="down" title="Fn DOWN only (no up)">down</button>
         <button class="cc-opt" data-sub="up" title="Fn UP only">up</button>
+        <button class="cc-opt" data-sub="escape" title="Tap Escape — may cancel an active Wispr recording">escape</button>
+        <button class="cc-opt" data-sub="menu" title="Click Wispr menu bar icon via AppleScript">menu click</button>
+        <button class="cc-opt" data-sub="nuclear" title="💣 Fire every plausible stop signal at once: Fn-up, Fn-tap, Fn×2, F19, Escape, menu click">💣 nuclear stop</button>
         <button class="cc-opt" id="cc-fn-release-tap" data-toggle="release_extra_tap"
           title="When 'hold' releases, also fire an extra Fn tap to force-stop toggle-style apps">
           release+tap
+        </button>
+        <button class="cc-opt" id="cc-fn-release-nuclear" data-toggle="release_nuclear"
+          title="When 'hold' releases, fire the full 💣 nuclear stop cascade">
+          release+💣
         </button>
       </div>
     </div>
@@ -1774,6 +1785,7 @@ HTML = """<!doctype html>
     fn_tap_toggle:     { gesture: 'prayer', mode: 'latch', method: 'cgevent_fn' },
     fn_double_toggle: { gesture: 'prayer', mode: 'latch', method: 'double_tap_fn' },
     fn_hold_tap:       { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn',    extraTap: true  },
+    fn_hold_nuclear:   { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn',    nuclear: true   },
     off:               { gesture: 'off',    mode: 'hold',  method: 'off' },
   };
   function paintWisprPreset(key) {
@@ -1798,11 +1810,14 @@ HTML = """<!doctype html>
         await fetch('/command', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'wispr_method', method: p.method }) });
-        if ('extraTap' in p) {
-          await fetch('/command', { method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'release_extra_tap', on: !!p.extraTap }) });
-        }
+        // Always explicitly set both release flags so switching presets
+        // doesn't leave stale toggles from a previous preset.
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'release_extra_tap', on: !!p.extraTap }) });
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'release_nuclear', on: !!p.nuclear }) });
       } catch {}
     });
   }
@@ -1811,12 +1826,12 @@ HTML = """<!doctype html>
   if (ccFnDiag) {
     ccFnDiag.addEventListener('click', (e) => {
       const b = e.target.closest('.cc-opt'); if (!b) return;
-      if (b.dataset.toggle === 'release_extra_tap') {
+      if (b.dataset.toggle) {
         const turnOn = !b.classList.contains('on');
         b.classList.toggle('on', turnOn);
         fetch('/command', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'release_extra_tap', on: turnOn }),
+          body: JSON.stringify({ action: b.dataset.toggle, on: turnOn }),
         }).catch(() => {});
         return;
       }
@@ -1837,8 +1852,8 @@ HTML = """<!doctype html>
       if (p.gesture === state.dictGesture
           && p.mode === state.dictMode
           && p.method === state.wispr
-          && (!('extraTap' in p)
-              || !!p.extraTap === !!state.releaseExtraTap)) {
+          && !!p.extraTap === !!state.releaseExtraTap
+          && !!p.nuclear === !!state.releaseNuclear) {
         paintWisprPreset(k); return;
       }
     }
@@ -2689,6 +2704,10 @@ HTML = """<!doctype html>
         const b = document.getElementById('cc-fn-release-tap');
         if (b) b.classList.toggle('on', !!msg.releaseExtraTap);
       }
+      if ('releaseNuclear' in msg) {
+        const b = document.getElementById('cc-fn-release-nuclear');
+        if (b) b.classList.toggle('on', !!msg.releaseNuclear);
+      }
       if (msg.clapTick) {
         clapCount += 1;
         const ci = document.getElementById('cc-clap-indicator');
@@ -3079,6 +3098,7 @@ _wispr_method: str = "off"  # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|
 # If True: after releasing a held Fn key, also fire a fresh tap. Useful when
 # Wispr treats Fn as a toggle and the key-up alone doesn't stop recording.
 _wispr_release_extra_tap: bool = False
+_wispr_release_nuclear: bool = False   # fire nuclear-stop cascade on release
 
 # Calibration centers (captured on cursor enable, per method).
 _finger_center: Optional[tuple] = None   # (fx, fy) in [0..1]
@@ -3884,6 +3904,56 @@ def _triple_tap_cgevent(keycode: int, fn_flag: bool = False,
     print(f"[viewer] wispr triple-tap (key={keycode} fn={fn_flag})", flush=True)
 
 
+def _tap_escape_cgevent() -> None:
+    """Tap Escape. Many Mac apps treat Escape as 'cancel current action',
+    which may stop an already-active Wispr recording."""
+    if not _QUARTZ_OK:
+        return
+    try:
+        d = CGEventCreateKeyboardEvent(None, 53, True)   # 53 = Escape
+        u = CGEventCreateKeyboardEvent(None, 53, False)
+        CGEventPost(kCGHIDEventTap, d)
+        CGEventPost(kCGHIDEventTap, u)
+        print("[viewer] escape tap", flush=True)
+    except Exception as e:
+        print(f"[viewer] escape tap failed: {e}", flush=True)
+
+
+def _nuclear_stop_wispr() -> None:
+    """Fire every plausible 'stop' signal at Wispr in sequence.
+    Hypothesis: Wispr latches on Fn key-down at a layer the synthetic Fn
+    key-up can't reach, so we spam multiple distinct stop channels. At
+    least one should be heard. Runs on a background thread so the capture
+    loop isn't stalled."""
+    def _fire():
+        # 1. Make sure any held Fn is released at the CGEvent layer.
+        try:
+            if _QUARTZ_OK:
+                u = CGEventCreateKeyboardEvent(None, 63, False)
+                CGEventSetFlags(u, kCGEventFlagMaskSecondaryFn)
+                CGEventPost(kCGHIDEventTap, u)
+        except Exception:
+            pass
+        time.sleep(0.05)
+        # 2. A fresh Fn tap (in case Fn is a toggle).
+        _tap_wispr_cgevent(63, fn_flag=True)
+        time.sleep(0.08)
+        # 3. A double-tap Fn (some Wispr configs use double-tap to toggle).
+        _double_tap_cgevent(63, fn_flag=True)
+        time.sleep(0.08)
+        # 4. F19 tap (alternate hotkey some users bind).
+        _tap_wispr_cgevent(80, fn_flag=False)
+        time.sleep(0.08)
+        # 5. Escape — many apps treat it as 'cancel/stop'.
+        _tap_escape_cgevent()
+        time.sleep(0.08)
+        # 6. AppleScript click the Wispr menu bar icon.
+        _tap_wispr_menu_click()
+        print("[viewer] 💣 nuclear stop sequence complete", flush=True)
+    threading.Thread(target=_fire, daemon=True).start()
+    print("[viewer] 💣 nuclear stop fired", flush=True)
+
+
 def _hold_cgevent_for(keycode: int, fn_flag: bool, hold_s: float) -> None:
     """Press key, sleep hold_s, release key. Simulates a deliberate human hold."""
     if not _QUARTZ_OK:
@@ -3996,6 +4066,10 @@ def _release_wispr_key_up() -> None:
             time.sleep(0.05)
             _tap_wispr_cgevent(kc, fn_flag=fn)
             print("[viewer] wispr HOLD + extra tap on release", flush=True)
+        if _wispr_release_nuclear:
+            # Synthetic Fn key-up is often ignored — spam every plausible
+            # stop signal so at least one takes.
+            _nuclear_stop_wispr()
     except Exception as e:
         print(f"[viewer] wispr hold-up failed: {e}", flush=True)
     finally:
@@ -5807,6 +5881,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "releaseExtraTap": _wispr_release_extra_tap}).encode(),
                 )
                 return
+            if action == "release_nuclear":
+                global _wispr_release_nuclear
+                _wispr_release_nuclear = bool(data.get("on"))
+                print(f"[viewer] wispr release-nuclear = "
+                      f"{_wispr_release_nuclear}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "releaseNuclear": _wispr_release_nuclear}).encode(),
+                )
+                return
             if action == "fn_diag":
                 # Manual one-shot Fn-key probes for diagnosing which variant
                 # Wispr (or anything else) actually listens to. keycode 63 = Fn.
@@ -5839,6 +5924,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             CGEventSetFlags(u, kCGEventFlagMaskSecondaryFn)
                             CGEventPost(kCGHIDEventTap, u)
                             print("[viewer] fn_diag: UP only", flush=True)
+                    elif sub == "escape":
+                        _tap_escape_cgevent()
+                    elif sub == "menu":
+                        _tap_wispr_menu_click()
+                    elif sub == "nuclear":
+                        _nuclear_stop_wispr()
                     print(f"[viewer] fn_diag {sub}", flush=True)
                 except Exception as e:
                     print(f"[viewer] fn_diag failed: {e}", flush=True)
@@ -6018,6 +6109,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
                         "releaseExtraTap": _wispr_release_extra_tap,
+                        "releaseNuclear": _wispr_release_nuclear,
                         "scrollGesture": _scroll_gesture_enabled,
                         "swipeGesture": _swipe_gesture_enabled,
                         "tabSwipe": _tab_swipe_enabled,
