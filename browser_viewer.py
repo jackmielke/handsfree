@@ -724,6 +724,31 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to double-click">👍 double-click</button>
       </div>
     </div>
+    <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
+      <div class="cc-label" style="color:#fbbf24;">🙏 wispr quickstart</div>
+      <div class="cc-opts" id="cc-wispr-preset-opts">
+        <button class="cc-opt" data-preset="menu_toggle"
+          title="Prayer hands click Wispr's menu bar icon to START listening. Un-pray clicks it again to STOP. Most reliable.">
+          pray → toggle (menu)
+        </button>
+        <button class="cc-opt" data-preset="f19_double_toggle"
+          title="Pray = double-tap F19. Requires F19 bound in Wispr + 'double-tap to toggle' enabled.">
+          pray → toggle (F19×2)
+        </button>
+        <button class="cc-opt" data-preset="f19_hold"
+          title="Pray = hold F19 down the whole time. Release = stop. Requires F19 bound in Wispr as press-and-hold.">
+          pray → hold (F19)
+        </button>
+        <button class="cc-opt" data-preset="fn_hold"
+          title="Pray = hold Fn (keycode 63). Original method. Works sometimes.">
+          pray → hold (Fn)
+        </button>
+        <button class="cc-opt" data-preset="off"
+          title="Disable prayer → Wispr entirely">
+          off
+        </button>
+      </div>
+    </div>
     <div class="cc-row">
       <div class="cc-label">pointing</div>
       <div class="cc-opts" id="cc-point-opts">
@@ -1709,6 +1734,55 @@ HTML = """<!doctype html>
     }).catch(() => {});
   });
 
+  // Wispr quickstart presets: bundle dict_gesture + dict_mode + wispr_method
+  // into a single one-click preset so the user doesn't have to reason about
+  // the combinations.
+  const ccWisprPreset = document.getElementById('cc-wispr-preset-opts');
+  const WISPR_PRESETS = {
+    menu_toggle:       { gesture: 'prayer', mode: 'latch', method: 'menu_click' },
+    f19_double_toggle: { gesture: 'prayer', mode: 'latch', method: 'double_tap_f19' },
+    f19_hold:          { gesture: 'prayer', mode: 'hold',  method: 'cgevent_f19' },
+    fn_hold:           { gesture: 'prayer', mode: 'hold',  method: 'cgevent_fn' },
+    off:               { gesture: 'off',    mode: 'hold',  method: 'off' },
+  };
+  function paintWisprPreset(key) {
+    if (!ccWisprPreset) return;
+    ccWisprPreset.querySelectorAll('.cc-opt').forEach(b => {
+      b.classList.toggle('on', b.dataset.preset === key);
+    });
+  }
+  if (ccWisprPreset) {
+    ccWisprPreset.addEventListener('click', async (e) => {
+      const b = e.target.closest('.cc-opt'); if (!b) return;
+      const p = WISPR_PRESETS[b.dataset.preset]; if (!p) return;
+      paintWisprPreset(b.dataset.preset);
+      // Fire sequentially so server state settles in a predictable order.
+      try {
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'dict_gesture', gesture: p.gesture }) });
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'dict_mode', mode: p.mode }) });
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'wispr_method', method: p.method }) });
+      } catch {}
+    });
+  }
+  // Keep the preset row synced with whatever combo the server reports.
+  function syncWisprPresetFromState(state) {
+    if (!state) return;
+    for (const [k, p] of Object.entries(WISPR_PRESETS)) {
+      if (p.gesture === state.dictGesture
+          && p.mode === state.dictMode
+          && p.method === state.wispr) {
+        paintWisprPreset(k); return;
+      }
+    }
+    paintWisprPreset(null);  // no matching preset → nothing highlighted
+  }
+
   // Experimental toggles at top of CC panel.
   const ccExp = document.getElementById('cc-exp-opts');
   if (ccExp) {
@@ -2588,6 +2662,9 @@ HTML = """<!doctype html>
       if ('clapPreset' in msg) paintActive(ccClap, msg.clapPreset);
       if ('dictGesture' in msg) paintActive(ccDict, msg.dictGesture);
       if ('dictMode' in msg) paintActive(ccDictMode, msg.dictMode);
+      if ('dictGesture' in msg || 'dictMode' in msg || 'wispr' in msg) {
+        syncWisprPresetFromState(msg);
+      }
     };
   }
 
