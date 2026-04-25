@@ -1476,8 +1476,10 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
-        <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go. Push the held ✌️ toward the camera to copy.">✌️ hold-to-drag · push to copy</button>
+        <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
+        <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to paste (Cmd+V).">👍 paste</button>
+        <button class="cc-opt" data-exp="fist_zoom" title="While the fist (grab) is held, push your hand toward the camera to zoom in, pull it back to zoom out. Side-to-side still pans.">🤛 fist depth zoom</button>
         <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
         <button class="cc-opt" id="cc-atelier-manual" title="Force atelier mode on/off without doing the pose">atelier: off</button>
       </div>
@@ -3564,6 +3566,14 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="thumbs_dclick"]');
         if (b) b.classList.toggle('on', !!msg.thumbsDclick);
       }
+      if ('headCopy' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="head_copy"]');
+        if (b) b.classList.toggle('on', !!msg.headCopy);
+      }
+      if ('fistZoom' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="fist_zoom"]');
+        if (b) b.classList.toggle('on', !!msg.fistZoom);
+      }
       if ('atelierEnabled' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="atelier"]');
         if (b) b.classList.toggle('on', !!msg.atelierEnabled);
@@ -4056,6 +4066,19 @@ PUSH_COPY_RATIO: float = 1.32        # 32% bigger ⇒ "shoved at camera"
 
 # Thumbs up 👍 → paste (Cmd+V). (Setting name kept for state compat.)
 _thumbs_dclick_enabled: bool = True
+
+# Head bob UP (chin-lift) → Cmd+C copy.
+_head_copy_enabled: bool = True
+
+# Fist depth zoom: while fist is held, hand moving toward camera = Cmd+=
+# (zoom in), away from camera = Cmd+- (zoom out). Lateral motion still
+# pans/scrolls as before.
+_fist_zoom_enabled: bool = True
+_fist_zoom_baseline: Optional[float] = None
+_fist_zoom_last_at: float = 0.0
+FIST_ZOOM_RATIO_IN: float = 1.18    # 18% bigger ⇒ zoom in
+FIST_ZOOM_RATIO_OUT: float = 0.85   # 15% smaller ⇒ zoom out
+FIST_ZOOM_COOLDOWN_S: float = 0.16  # gap between zoom steps
 _thumbs_armed: bool = True
 _thumbs_last_at: float = 0.0
 
@@ -4350,6 +4373,35 @@ def _ensure_model(path: Path, url: str) -> bool:
     except Exception as e:
         print(f"[viewer] download failed: {e}", flush=True)
         return False
+
+
+_last_head_up_at: float = 0.0
+HEAD_UP_ASCENT_THRESHOLD = 0.012   # bigger than bob-down so it's deliberate
+HEAD_UP_COOLDOWN_S = 0.55
+
+
+def _detect_head_bob_up(nose_y: Optional[float], now: float) -> bool:
+    """Fire when the head bobs UP (chin-lift nod) and returns.
+
+    Mirrors `_detect_bob` but inverts direction. Reads the same
+    rolling nose-y history; uses a separate cooldown so up- and
+    down-bobs don't fight.
+    """
+    global _last_head_up_at
+    if nose_y is None:
+        return False
+    if len(_nose_y_history) < 5:
+        return False
+    hist = list(_nose_y_history)
+    # Image coords: y decreases as head rises, so ascent = hist[-5]-hist[-3].
+    earlier_ascent = hist[-5] - hist[-3]
+    recent_vel = hist[-1] - hist[-3]   # positive = falling back down
+    if (earlier_ascent > HEAD_UP_ASCENT_THRESHOLD
+            and recent_vel >= 0
+            and (now - _last_head_up_at) > HEAD_UP_COOLDOWN_S):
+        _last_head_up_at = now
+        return True
+    return False
 
 
 def _detect_bob(nose_y: Optional[float], now: float) -> bool:
@@ -6120,6 +6172,61 @@ def _detect_peace_rclick(hands_lm_list, now: float) -> bool:
     return _edge_trigger_gesture(match, '_peace_armed', '_peace_last_at', now)
 
 
+def _toast(title: str, message: str = "") -> None:
+    """Native macOS notification (pops outside the browser).
+
+    Fired in a daemon thread so the capture loop never blocks on
+    the osascript call (which can take 50–200ms cold).
+    """
+    def _go():
+        try:
+            esc_t = title.replace('"', '\\"')
+            esc_m = message.replace('"', '\\"')
+            script = (f'display notification "{esc_m}" '
+                      f'with title "{esc_t}"')
+            subprocess.run(
+                ["osascript", "-e", script],
+                check=False, timeout=2.0,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+
+
+def _update_fist_zoom(hands_list, now: float) -> Optional[str]:
+    """While a fist is held, push toward camera = zoom in, pull back =
+    zoom out. Uses wrist↔middle-MCP distance as a depth proxy. Returns
+    'in' / 'out' / None. Resets baseline whenever the fist drops."""
+    global _fist_zoom_baseline, _fist_zoom_last_at
+    fist_hand = None
+    if hands_list:
+        for h in hands_list:
+            if _is_fist(h):
+                fist_hand = h
+                break
+    if fist_hand is None:
+        _fist_zoom_baseline = None
+        return None
+    scale = _hand_scale(fist_hand)
+    if _fist_zoom_baseline is None:
+        _fist_zoom_baseline = scale
+        return None
+    if now - _fist_zoom_last_at < FIST_ZOOM_COOLDOWN_S:
+        return None
+    ratio = scale / max(_fist_zoom_baseline, 1e-6)
+    if ratio >= FIST_ZOOM_RATIO_IN:
+        _fist_zoom_baseline = scale  # rebaseline so a long push keeps zooming
+        _fist_zoom_last_at = now
+        return "in"
+    if ratio <= FIST_ZOOM_RATIO_OUT:
+        _fist_zoom_baseline = scale
+        _fist_zoom_last_at = now
+        return "out"
+    return None
+
+
 def _hand_scale(hand) -> float:
     """Hand-size proxy: distance from wrist (0) to middle-finger MCP (9).
     Grows when the hand moves toward the camera, shrinks as it pulls back."""
@@ -6130,60 +6237,24 @@ def _hand_scale(hand) -> float:
 def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
     """While ✌️ is held, mouse is held down (drag/select). On release,
     mouseUp. Includes a small grace window so a momentarily-lost hand
-    doesn't drop the mouse mid-drag.
-
-    Also tracks a "push toward camera" gesture during hold: if the hand
-    grows past PUSH_COPY_RATIO of its baseline scale, fires Cmd+C once
-    per hold session (returns 'copy').
-
-    Returns 'down' / 'up' / 'copy' on transitions, else None.
+    doesn't drop the mouse mid-drag. Returns 'down' / 'up' on transitions,
+    else None.
     """
     global _peace_hold_down, _peace_hold_release_at
-    global _peace_push_baseline, _peace_push_baseline_t, _peace_push_fired
-    peace_hand = None
-    if hands_lm_list:
-        for h in hands_lm_list:
-            if _is_peace_sign(h):
-                peace_hand = h
-                break
-    match = peace_hand is not None
+    match = bool(hands_lm_list) and any(
+        _is_peace_sign(h) for h in hands_lm_list
+    )
     if match:
         _peace_hold_release_at = 0.0
         if not _peace_hold_down:
             try:
                 pyautogui.mouseDown(_pause=False)
                 _peace_hold_down = True
-                # reset push tracking for this session
-                _peace_push_baseline = _hand_scale(peace_hand)
-                _peace_push_baseline_t = now
-                _peace_push_fired = False
                 return "down"
             except Exception as e:
                 print(f"[viewer] peace mouseDown failed: {e}", flush=True)
-                return None
-        # already holding — track baseline + push
-        scale = _hand_scale(peace_hand)
-        if (_peace_push_baseline is None
-                or now - _peace_push_baseline_t < PUSH_COPY_BASELINE_S):
-            # still settling — keep the smaller value (rest position)
-            if (_peace_push_baseline is None
-                    or scale < _peace_push_baseline):
-                _peace_push_baseline = scale
-                _peace_push_baseline_t = now
-            return None
-        if (not _peace_push_fired and _peace_push_baseline > 0
-                and scale / _peace_push_baseline >= PUSH_COPY_RATIO):
-            # SHOVE → Cmd+C
-            try:
-                _fire_hotkey("cmd+c")
-                _peace_push_fired = True
-                return "copy"
-            except Exception as e:
-                print(f"[viewer] cmd+c failed: {e}", flush=True)
         return None
-    # not matching this frame
     if _peace_hold_down:
-        # start the grace timer; only release if it expires
         if _peace_hold_release_at == 0.0:
             _peace_hold_release_at = now
             return None
@@ -6195,8 +6266,6 @@ def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
             print(f"[viewer] peace mouseUp failed: {e}", flush=True)
         _peace_hold_down = False
         _peace_hold_release_at = 0.0
-        _peace_push_baseline = None
-        _peace_push_fired = False
         return "up"
     return None
 
@@ -6204,7 +6273,6 @@ def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
 def _peace_hold_force_release() -> None:
     """Release any held mouse — call on master-off / disable."""
     global _peace_hold_down, _peace_hold_release_at
-    global _peace_push_baseline, _peace_push_fired
     if _peace_hold_down:
         try:
             pyautogui.mouseUp(_pause=False)
@@ -6212,8 +6280,6 @@ def _peace_hold_force_release() -> None:
             pass
     _peace_hold_down = False
     _peace_hold_release_at = 0.0
-    _peace_push_baseline = None
-    _peace_push_fired = False
 
 
 def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
@@ -6461,6 +6527,15 @@ def _capture_loop() -> None:
         now = time.time()
         nose_y_only = face_nose[1] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
+        # Head bob UP (chin lift) → Cmd+C copy + native toast.
+        if (_head_copy_enabled and _system_enabled
+                and _detect_head_bob_up(nose_y_only, now)):
+            print("[viewer] 🙆 head-up → cmd+c", flush=True)
+            try:
+                _fire_hotkey("cmd+c")
+                _toast("handsfree", "copied ✂︎")
+            except Exception as e:
+                print(f"[viewer] head-up copy failed: {e}", flush=True)
         blinked = _detect_blink(face_blendshapes, now)
         prayer_change = _update_dict_gesture(hands_lm_list, now)
         booted, clap_tick = _update_double_clap(hands_lm_list, now)
@@ -6530,6 +6605,7 @@ def _capture_loop() -> None:
             print("[viewer] thumbs 👍 → cmd+v", flush=True)
             try:
                 _fire_hotkey("cmd+v")
+                _toast("handsfree", "pasted 📋")
             except Exception as e:
                 print(f"[viewer] cmd+v failed: {e}", flush=True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
@@ -6547,6 +6623,16 @@ def _capture_loop() -> None:
             with _state_lock:
                 _swipe_pending = f"tab-{tab_dir}"
         if _scroll_mode == "fist":
+            # Fist depth → zoom: push toward camera = Cmd+=, pull away = Cmd+-.
+            # Lateral motion still drives pan/scroll below.
+            if _fist_zoom_enabled and _system_enabled:
+                zdir = _update_fist_zoom(hands_lm_list, now)
+                if zdir is not None:
+                    try:
+                        _fire_hotkey("cmd+=" if zdir == "in" else "cmd+-")
+                        print(f"[viewer] 🤛 fist-zoom {zdir}", flush=True)
+                    except Exception as e:
+                        print(f"[viewer] fist-zoom failed: {e}", flush=True)
             v_amt, h_amt = _update_fist_scroll(hands_lm_list, now)
             if _system_enabled and _scroll_gesture_enabled and (v_amt or h_amt):
                 # Emit a single native two-axis scroll event so Figma sees
@@ -7343,6 +7429,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
                 )
                 return
+            if action == "head_copy":
+                global _head_copy_enabled
+                _head_copy_enabled = bool(data.get("on"))
+                print(f"[viewer] head-up copy = {_head_copy_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "headCopy": _head_copy_enabled}).encode(),
+                )
+                return
+            if action == "fist_zoom":
+                global _fist_zoom_enabled, _fist_zoom_baseline
+                _fist_zoom_enabled = bool(data.get("on"))
+                _fist_zoom_baseline = None
+                print(f"[viewer] fist-zoom = {_fist_zoom_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "fistZoom": _fist_zoom_enabled}).encode(),
+                )
+                return
             if action == "boxing":
                 global _boxing_enabled, _left_wrist_prev, _right_wrist_prev
                 _boxing_enabled = bool(data.get("on"))
@@ -7632,6 +7737,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
+                        "headCopy": _head_copy_enabled,
+                        "fistZoom": _fist_zoom_enabled,
                         "atelierEnabled": _atelier_enabled,
                         "atelierMode": _atelier_mode,
                         "releaseExtraTap": _wispr_release_extra_tap,
