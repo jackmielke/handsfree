@@ -430,6 +430,380 @@ WISPR_USE_FN_FLAG = os.environ.get("HANDSFREE_WISPR_FN_FLAG", "0") == "1"
 HAND_PLAY_THRESHOLD_Y = 0.55
 
 
+BOXING_HTML = r"""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>handsfree — 🥊 muay thai</title>
+<style>
+  :root {
+    --warm: #f5c24a;
+    --hot:  #ff4d4d;
+    --cool: #6ee7b7;
+    --bg:   #0a0a0f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000; color: #fff;
+    font-family: 'Bebas Neue', Impact, system-ui, sans-serif;
+    overflow: hidden; user-select: none; -webkit-user-select: none;
+  }
+  #stage {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, #1a0a0a 0%, #000 70%);
+    overflow: hidden;
+  }
+  /* Camera feed full-bleed, slightly desaturated/dimmed so emoji+FX pop */
+  #cam {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover;
+    filter: brightness(0.55) saturate(0.6) contrast(1.15);
+    z-index: 1;
+  }
+  #vignette {
+    position: absolute; inset: 0; pointer-events: none; z-index: 2;
+    background:
+      radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.7) 100%);
+  }
+  /* The opponent — McGregor's head emoji 🤡 */
+  #target {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%,-50%);
+    font-size: 280px; line-height: 1;
+    z-index: 5; cursor: pointer;
+    filter: drop-shadow(0 0 24px rgba(255,77,77,0.5));
+    transition: transform 120ms cubic-bezier(.2,1.4,.4,1);
+  }
+  #target.hit {
+    animation: shake 280ms cubic-bezier(.2,1.4,.4,1);
+  }
+  @keyframes shake {
+    0%   { transform: translate(-50%,-50%) scale(1.0) rotate(0); }
+    20%  { transform: translate(-58%,-46%) scale(0.85) rotate(-12deg); }
+    40%  { transform: translate(-44%,-54%) scale(0.92) rotate(10deg); }
+    60%  { transform: translate(-54%,-48%) scale(1.08) rotate(-6deg); }
+    100% { transform: translate(-50%,-50%) scale(1.0) rotate(0); }
+  }
+  /* HUD */
+  .hud {
+    position: absolute; z-index: 10;
+    text-shadow: 0 2px 0 #000, 0 0 12px rgba(255,77,77,0.4);
+    letter-spacing: 0.04em;
+  }
+  #counter { top: 24px; left: 28px; font-size: 88px; line-height: 1; color: var(--warm); }
+  #counter small { display:block; font-size: 14px; letter-spacing: 0.32em;
+    color: #999; font-family: ui-monospace, Menlo, monospace; }
+  #stats { top: 28px; right: 28px; text-align: right; font-size: 16px;
+    font-family: ui-monospace, Menlo, monospace; color: #ddd;
+    line-height: 1.6; }
+  #stats span { color: var(--warm); font-weight: 700; }
+  #title { bottom: 24px; left: 50%; transform: translateX(-50%);
+    font-size: 28px; letter-spacing: 0.42em; color: #777; }
+  /* Toggles */
+  .toolbar {
+    position: absolute; bottom: 24px; right: 24px; z-index: 12;
+    display: flex; gap: 8px;
+  }
+  .btn {
+    background: rgba(255,255,255,0.08); border: 1px solid #333;
+    color: #ddd; padding: 8px 14px; border-radius: 999px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    letter-spacing: 0.18em; text-transform: uppercase; cursor: pointer;
+  }
+  .btn.on { background: var(--hot); color: #150404; border-color: var(--hot); }
+  .btn:hover { border-color: var(--warm); }
+  /* Comic-book POW! pop text */
+  .pow {
+    position: absolute; pointer-events: none; z-index: 8;
+    font-size: 92px; font-weight: 900; letter-spacing: 0.04em;
+    color: #fff;
+    -webkit-text-stroke: 4px #000;
+    text-shadow: 6px 6px 0 #ff4d4d, 12px 12px 0 #000;
+    transform-origin: center;
+    animation: pow 720ms cubic-bezier(.2,1.6,.4,1) forwards;
+  }
+  .pow.uppercut { color: var(--cool); text-shadow: 6px 6px 0 #1d6c4a, 12px 12px 0 #000; }
+  .pow.hook     { color: var(--warm); text-shadow: 6px 6px 0 #8a6a18, 12px 12px 0 #000; }
+  .pow.cross, .pow.jab { color: #fff; }
+  @keyframes pow {
+    0%   { opacity: 0; transform: translate(-50%,-50%) scale(0.2) rotate(-12deg); }
+    20%  { opacity: 1; transform: translate(-50%,-50%) scale(1.25) rotate(-6deg); }
+    100% { opacity: 0; transform: translate(-50%,-50%) scale(1.0) rotate(8deg)
+                                  translateY(-40px); }
+  }
+  body.shake #stage { animation: stage-shake 220ms ease-out; }
+  @keyframes stage-shake {
+    0%, 100% { transform: translate(0,0); }
+    20% { transform: translate(-6px, 4px); }
+    40% { transform: translate(8px, -6px); }
+    60% { transform: translate(-4px, -2px); }
+    80% { transform: translate(4px, 4px); }
+  }
+  body.flash::after {
+    content: ""; position: fixed; inset: 0; z-index: 100; pointer-events: none;
+    background: rgba(255,77,77,0.25);
+    animation: flash 180ms ease-out forwards;
+  }
+  @keyframes flash { 0% { opacity: 1; } 100% { opacity: 0; } }
+  /* Health bar over target */
+  #hp-wrap {
+    position: absolute; left: 50%; top: calc(50% - 200px);
+    transform: translateX(-50%); width: 320px; height: 14px; z-index: 6;
+    background: #1a0606; border: 2px solid #000;
+    border-radius: 8px; overflow: hidden;
+  }
+  #hp { width: 100%; height: 100%;
+    background: linear-gradient(90deg, #ff4d4d, var(--warm));
+    transition: width 220ms ease-out;
+  }
+  /* round timer */
+  #round { position: absolute; top: 28px; left: 50%; transform: translateX(-50%);
+    z-index: 10; font-size: 48px; color: #fff; letter-spacing: 0.16em;
+    text-shadow: 0 2px 0 #000; }
+  #round small { display:block; font-size:11px; letter-spacing:0.3em; color:#888;
+    font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <img id="cam" src="/stream" alt="cam">
+    <div id="vignette"></div>
+    <div id="hp-wrap"><div id="hp"></div></div>
+    <div id="target">🤡</div>
+    <div id="counter">0<small>strikes</small></div>
+    <div id="stats">
+      <div>jab    <span id="s-jab">0</span></div>
+      <div>cross  <span id="s-cross">0</span></div>
+      <div>hook   <span id="s-hook">0</span></div>
+      <div>upper  <span id="s-uppercut">0</span></div>
+      <div>peak   <span id="s-peak">0.0</span></div>
+    </div>
+    <div id="round">3:00<small>round 1</small></div>
+    <div id="title">🥊 MUAY THAI · YOLO MODE</div>
+    <div class="toolbar">
+      <button class="btn on" id="tog-detect">detect: on</button>
+      <button class="btn" id="tog-sound">sound</button>
+      <button class="btn" id="tog-bell">round</button>
+      <button class="btn" id="reset">reset</button>
+    </div>
+  </div>
+<script>
+  // -- toggle detection on the server (gate the punch detector) ----------
+  fetch('/command', { method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'boxing', on:true}) }).catch(()=>{});
+
+  let detect = true;
+  document.getElementById('tog-detect').addEventListener('click', e => {
+    detect = !detect;
+    e.target.classList.toggle('on', detect);
+    e.target.textContent = 'detect: ' + (detect ? 'on' : 'off');
+    fetch('/command', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'boxing', on:detect}) }).catch(()=>{});
+  });
+
+  // Disable on page leave so the gesture loop doesn't keep classifying.
+  window.addEventListener('beforeunload', () => {
+    try {
+      navigator.sendBeacon('/command',
+        new Blob([JSON.stringify({action:'boxing', on:false})],
+                 {type:'application/json'}));
+    } catch(e) {}
+  });
+
+  // -- counters ----------------------------------------------------------
+  const counts = { jab:0, cross:0, hook:0, uppercut:0 };
+  let total = 0, peak = 0;
+  let hp = 100;
+  const elCounter = document.getElementById('counter');
+  const elHp      = document.getElementById('hp');
+  const elTarget  = document.getElementById('target');
+  function updateHud() {
+    elCounter.firstChild.nodeValue = total;
+    for (const k of Object.keys(counts)) {
+      document.getElementById('s-'+k).textContent = counts[k];
+    }
+    document.getElementById('s-peak').textContent = peak.toFixed(2);
+    elHp.style.width = Math.max(0, hp) + '%';
+  }
+
+  document.getElementById('reset').addEventListener('click', () => {
+    for (const k of Object.keys(counts)) counts[k] = 0;
+    total = 0; peak = 0; hp = 100; updateHud();
+  });
+
+  // -- sounds (Web Audio synth thump) ------------------------------------
+  let soundOn = true;
+  const tgSound = document.getElementById('tog-sound');
+  tgSound.classList.add('on'); tgSound.textContent = 'sound: on';
+  tgSound.addEventListener('click', () => {
+    soundOn = !soundOn;
+    tgSound.classList.toggle('on', soundOn);
+    tgSound.textContent = 'sound: ' + (soundOn ? 'on' : 'off');
+  });
+  let actx = null;
+  function ac() {
+    if (!actx) { try { actx = new (window.AudioContext||window.webkitAudioContext)(); }
+                 catch(e) { return null; } }
+    if (actx.state === 'suspended') actx.resume().catch(()=>{});
+    return actx;
+  }
+  function thump(intensity, type) {
+    if (!soundOn) return;
+    const ctx = ac(); if (!ctx) return;
+    const t0 = ctx.currentTime;
+    // Body: low sine punch
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sine';
+    const baseFreq = type === 'uppercut' ? 90 : type === 'hook' ? 110 : 140;
+    osc.frequency.setValueAtTime(baseFreq * (1 + intensity * 0.6), t0);
+    osc.frequency.exponentialRampToValueAtTime(40, t0 + 0.15);
+    g.gain.setValueAtTime(0.0, t0);
+    g.gain.linearRampToValueAtTime(0.45 * (0.4 + intensity), t0 + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.22);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + 0.25);
+    // Click: short noise burst
+    try {
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.04, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 2);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const hp = ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1200;
+      const ng = ctx.createGain(); ng.gain.value = 0.18 * (0.4 + intensity);
+      src.connect(hp).connect(ng).connect(ctx.destination);
+      src.start(t0);
+    } catch(e){}
+  }
+  function bell() {
+    if (!soundOn) return;
+    const ctx = ac(); if (!ctx) return;
+    const t0 = ctx.currentTime;
+    [0,0.18,0.36].forEach((dt, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type='triangle';
+      o.frequency.setValueAtTime(880, t0+dt);
+      o.frequency.exponentialRampToValueAtTime(440, t0+dt+0.6);
+      g.gain.setValueAtTime(0.0, t0+dt);
+      g.gain.linearRampToValueAtTime(0.22, t0+dt+0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t0+dt+0.7);
+      o.connect(g).connect(ctx.destination);
+      o.start(t0+dt); o.stop(t0+dt+0.75);
+    });
+  }
+  document.getElementById('tog-bell').addEventListener('click', bell);
+
+  // -- punch FX ---------------------------------------------------------
+  const STAGE = document.getElementById('stage');
+  const WORDS = {
+    jab:      ['POW!', 'BAM!', 'WHAP!', 'JAB!'],
+    cross:    ['BOOM!', 'CRACK!', 'WHAM!', 'CROSS!'],
+    hook:     ['THWACK!', 'KAPOW!', 'SOCK!', 'HOOK!'],
+    uppercut: ['ZONK!', 'KABLAM!', 'BOFF!', 'UPPERCUT!'],
+    straight: ['POW!', 'BAM!'],
+  };
+  function spawnPow(type, x, y) {
+    const el = document.createElement('div');
+    el.className = 'pow ' + type;
+    const words = WORDS[type] || WORDS.jab;
+    el.textContent = words[Math.floor(Math.random()*words.length)];
+    // Camera is mirrored visually — flip x so the FX appears where you
+    // actually punched (image-left x close to 0 → screen-right side).
+    const px = (1 - x) * window.innerWidth;
+    const py = y * window.innerHeight;
+    el.style.left = px + 'px';
+    el.style.top  = py + 'px';
+    el.style.transform = 'translate(-50%,-50%) scale(1) rotate(0)';
+    STAGE.appendChild(el);
+    setTimeout(() => el.remove(), 740);
+  }
+  function hitTarget(type, intensity) {
+    elTarget.classList.remove('hit');
+    void elTarget.offsetWidth; // restart anim
+    elTarget.classList.add('hit');
+    // Damage scaled by intensity. Hooks + uppercuts hit harder.
+    const mult = (type === 'hook' || type === 'uppercut') ? 1.6 : 1.0;
+    hp = Math.max(0, hp - 4 * mult * (0.4 + intensity));
+    if (hp <= 0) {
+      elTarget.textContent = '😵';
+      setTimeout(() => { hp = 100; elTarget.textContent = '🤡'; updateHud(); }, 1400);
+    } else if (hp < 30) {
+      elTarget.textContent = '🥴';
+    } else if (hp < 60) {
+      elTarget.textContent = '😣';
+    } else {
+      elTarget.textContent = '🤡';
+    }
+  }
+  function flashScreen() {
+    document.body.classList.remove('flash');
+    void document.body.offsetWidth;
+    document.body.classList.add('flash');
+    document.body.classList.remove('shake');
+    void document.body.offsetWidth;
+    document.body.classList.add('shake');
+    setTimeout(() => {
+      document.body.classList.remove('flash');
+      document.body.classList.remove('shake');
+    }, 280);
+  }
+
+  // -- SSE: punch events from server -------------------------------------
+  function connectSSE() {
+    const es = new EventSource('/events');
+    es.onmessage = (m) => {
+      let msg; try { msg = JSON.parse(m.data); } catch (e) { return; }
+      if (Array.isArray(msg.punches)) {
+        for (const p of msg.punches) {
+          const type = p.type || 'jab';
+          const c = type === 'straight' ? 'jab' : type;
+          if (counts[c] !== undefined) counts[c]++;
+          else counts.jab++;
+          total++;
+          if (p.speed > peak) peak = p.speed;
+          spawnPow(type, p.x, p.y);
+          hitTarget(type, p.intensity || 0.5);
+          flashScreen();
+          thump(p.intensity || 0.5, type);
+          updateHud();
+        }
+      }
+    };
+    es.onerror = () => { es.close(); setTimeout(connectSSE, 1500); };
+  }
+  connectSSE();
+  updateHud();
+
+  // -- round timer (3:00 / 1:00 rest, optional bell on transitions) -----
+  let roundT = 180; // 3 minutes
+  let onBreak = false;
+  let roundN = 1;
+  const elRound = document.getElementById('round');
+  function fmt(t) {
+    const m = Math.floor(t/60); const s = t%60;
+    return m + ':' + (s<10?'0':'') + s;
+  }
+  setInterval(() => {
+    roundT--;
+    if (roundT <= 0) {
+      bell();
+      onBreak = !onBreak;
+      if (onBreak) { roundT = 60; elRound.firstChild.nodeValue = '1:00'; }
+      else { roundN++; roundT = 180; }
+      elRound.querySelector('small').textContent =
+        onBreak ? 'rest' : 'round ' + roundN;
+    } else {
+      elRound.firstChild.nodeValue = fmt(roundT);
+    }
+  }, 1000);
+</script>
+</body></html>
+"""
+
+
 HTML = """<!doctype html>
 <html><head>
 <meta charset="utf-8">
@@ -3231,6 +3605,19 @@ _clap_tick_pending = False
 _swipe_pending: Optional[str] = None  # "left" or "right"
 _atelier_toggle_pending: bool = False
 _atelier_action_pending: Optional[str] = None
+
+# 🥊 Muay Thai / boxing mode. When enabled, the capture loop classifies
+# fast wrist motion into jabs / hooks / uppercuts and emits SSE punch
+# events so the /boxing page can react. Cheap to compute, gated behind a
+# flag so it doesn't add overhead when nobody's training.
+_boxing_enabled: bool = False
+_punch_pending: list = []  # list[dict] of punch events to flush this tick
+_left_wrist_prev: Optional[tuple] = None
+_right_wrist_prev: Optional[tuple] = None
+_left_punch_last_at: float = 0.0
+_right_punch_last_at: float = 0.0
+PUNCH_VELOCITY_THR: float = 0.040     # normalized units / frame
+PUNCH_COOLDOWN_S: float = 0.22
 _dictation_pending = False
 _left_hand_y: Optional[float] = None
 _right_hand_y: Optional[float] = None
@@ -5085,6 +5472,88 @@ def _update_atelier(hands_lm_list, now: float) -> Optional[str]:
     return None
 
 
+def _detect_punches(hands_lm_list, now: float) -> list:
+    """Classify fast wrist motion into jab / cross / hook / uppercut.
+    Returns list of dicts: {hand: 'left'|'right', type, x, y, intensity}.
+
+    'left'/'right' refers to image-space (camera is mirrored — image-left
+    is the user's right hand). The boxing UI labels punches by screen
+    side so this matches the user's mental model when they look at the
+    feed. Velocity = wrist motion in normalized coords per frame.
+    """
+    global _left_wrist_prev, _right_wrist_prev
+    global _left_punch_last_at, _right_punch_last_at
+    out: list = []
+    if not _boxing_enabled or not hands_lm_list:
+        # Drop history when no hands so we don't spike on re-acquire.
+        if not hands_lm_list:
+            _left_wrist_prev = None
+            _right_wrist_prev = None
+        return out
+    # Sort by wrist x: smaller x = image-left side.
+    pairs = sorted(((float(h[0].x), float(h[0].y), h) for h in hands_lm_list),
+                   key=lambda p: p[0])
+    left = pairs[0] if pairs else None
+    right = pairs[1] if len(pairs) > 1 else None
+
+    def _classify(prev, cur, last_at):
+        if prev is None:
+            return None
+        if now - last_at < PUNCH_COOLDOWN_S:
+            return None
+        vx = cur[0] - prev[0]
+        vy = cur[1] - prev[1]
+        speed = math.hypot(vx, vy)
+        if speed < PUNCH_VELOCITY_THR:
+            return None
+        # Classify by dominant axis. y grows DOWNWARD in image coords →
+        # uppercut = vy strongly negative (hand moves up).
+        if vy < 0 and abs(vy) > abs(vx) * 1.15:
+            ptype = "uppercut"
+        elif abs(vx) > abs(vy) * 1.15:
+            ptype = "hook"
+        else:
+            ptype = "straight"  # jab/cross — distinguished by hand below
+        intensity = min(1.0, speed / 0.12)
+        return {
+            "type": ptype,
+            "x": cur[0],
+            "y": cur[1],
+            "intensity": round(intensity, 3),
+            "speed": round(speed, 4),
+        }
+
+    if left is not None:
+        evt = _classify(_left_wrist_prev, (left[0], left[1]),
+                        _left_punch_last_at)
+        if evt is not None:
+            evt["hand"] = "left"
+            # Image-left = user's right hand → cross (rear hand for orthodox).
+            if evt["type"] == "straight":
+                evt["type"] = "cross"
+            out.append(evt)
+            _left_punch_last_at = now
+        _left_wrist_prev = (left[0], left[1])
+    else:
+        _left_wrist_prev = None
+
+    if right is not None:
+        evt = _classify(_right_wrist_prev, (right[0], right[1]),
+                        _right_punch_last_at)
+        if evt is not None:
+            evt["hand"] = "right"
+            # Image-right = user's left hand → jab (lead hand for orthodox).
+            if evt["type"] == "straight":
+                evt["type"] = "jab"
+            out.append(evt)
+            _right_punch_last_at = now
+        _right_wrist_prev = (right[0], right[1])
+    else:
+        _right_wrist_prev = None
+
+    return out
+
+
 def _face_size_proxy(face_landmarks) -> Optional[float]:
     """Return a size-proxy for the face (outer-eye-corner span). Grows as
     the user leans toward the camera — used for head-dolly zoom."""
@@ -5385,6 +5854,7 @@ def _capture_loop() -> None:
     global _atelier_mode, _atelier_baseline_dist
     global _atelier_baseline_cx, _atelier_baseline_cy
     global _atelier_toggle_pending, _atelier_action_pending
+    global _punch_pending
     cam = Camera()
     for _ in range(30):
         ok, _ = cam.read()
@@ -5548,6 +6018,13 @@ def _capture_loop() -> None:
         else:
             # Safety: release any held mouse if we exited atelier mid-grab.
             _update_atelier_pinch_grab(hands_lm_list)
+
+        # 🥊 Boxing punch detection — feeds /boxing page via SSE.
+        if _boxing_enabled:
+            punches = _detect_punches(hands_lm_list, now)
+            if punches:
+                with _state_lock:
+                    _punch_pending.extend(punches)
         # Peace sign ✌️ → right-click
         if (_peace_rclick_enabled and _system_enabled
                 and _detect_peace_rclick(hands_lm_list, now)):
@@ -6340,6 +6817,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
                 )
                 return
+            if action == "boxing":
+                global _boxing_enabled, _left_wrist_prev, _right_wrist_prev
+                _boxing_enabled = bool(data.get("on"))
+                _left_wrist_prev = None
+                _right_wrist_prev = None
+                print(f"[viewer] 🥊 boxing = {_boxing_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "boxing": _boxing_enabled}).encode(),
+                )
+                return
             if action == "atelier":
                 # Toggle the feature ENABLE (gesture detection). The mode
                 # itself is entered/exited by doing the A-pose.
@@ -6510,6 +6998,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                HTML.encode("utf-8"))
             return
 
+        if self.path == "/boxing":
+            self._write_status(200, "text/html; charset=utf-8",
+                               BOXING_HTML.encode("utf-8"))
+            return
+
         if self.path == "/stream":
             self.send_response(200)
             self.send_header(
@@ -6556,6 +7049,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     global _boot_pending, _swipe_pending, _dictation_pending
                     global _clap_tick_pending
                     global _atelier_toggle_pending, _atelier_action_pending
+                    global _punch_pending
                     with _state_lock:
                         bob = _bob_pending
                         blink = _blink_pending
@@ -6567,6 +7061,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         dictation = _dictation_pending
                         atelier_toggle = _atelier_toggle_pending
                         atelier_action = _atelier_action_pending
+                        punches = list(_punch_pending)
+                        _punch_pending.clear()
                         _bob_pending = False
                         _blink_pending = False
                         _prayer_start_pending = False
@@ -6637,6 +7133,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if dictation: payload["dictation"] = True
                     if atelier_toggle: payload["atelierToggled"] = True
                     if atelier_action: payload["atelierAction"] = atelier_action
+                    if punches: payload["punches"] = punches
                     line = f"data: {json.dumps(payload)}\n\n"
                     try:
                         self.wfile.write(line.encode("utf-8"))
