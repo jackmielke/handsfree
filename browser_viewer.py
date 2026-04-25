@@ -1476,9 +1476,8 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
-        <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold the mouse button">mouth hold</button>
-        <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
-        <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to double-click">👍 double-click</button>
+        <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go. Push the held ✌️ toward the camera to copy.">✌️ hold-to-drag · push to copy</button>
+        <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to paste (Cmd+V).">👍 paste</button>
         <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
         <button class="cc-opt" id="cc-atelier-manual" title="Force atelier mode on/off without doing the pose">atelier: off</button>
       </div>
@@ -1660,11 +1659,12 @@ HTML = """<!doctype html>
     </div>
     <div class="cc-row">
       <div class="cc-label">scroll speed</div>
-      <div class="cc-opts" id="cc-scroll-opts">
-        <button class="cc-opt" data-v="off">off</button>
-        <button class="cc-opt" data-v="gentle">gentle</button>
-        <button class="cc-opt" data-v="normal">normal</button>
-        <button class="cc-opt" data-v="zippy">zippy</button>
+      <div class="cc-opts" style="flex:1; min-width:0;">
+        <input type="range" id="cc-scroll-speed" min="0.5" max="6.0" step="0.1"
+               value="3.0" style="flex:1; accent-color:var(--accent);
+               min-width:140px;">
+        <span id="cc-scroll-speed-val" style="font-size:11px; color:var(--dim);
+              min-width:42px; text-align:right;">3.0×</span>
       </div>
     </div>
     <div class="cc-row">
@@ -2850,18 +2850,21 @@ HTML = """<!doctype html>
     }).catch(() => {});
   });
 
-  const ccScroll = document.getElementById('cc-scroll-opts');
-  function postScroll(sens) {
+  const ccScrollSpeed = document.getElementById('cc-scroll-speed');
+  const ccScrollSpeedVal = document.getElementById('cc-scroll-speed-val');
+  function paintScrollSpeed(v) {
+    const n = Number(v);
+    if (document.activeElement !== ccScrollSpeed) ccScrollSpeed.value = n;
+    ccScrollSpeedVal.textContent = n.toFixed(1) + '×';
+  }
+  ccScrollSpeed.addEventListener('input', () => {
+    paintScrollSpeed(ccScrollSpeed.value);
     fetch('/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'scroll_sens', sens }),
+      body: JSON.stringify({ action: 'scroll_speed',
+                             value: parseFloat(ccScrollSpeed.value) }),
     }).catch(() => {});
-  }
-  ccScroll.addEventListener('click', (e) => {
-    const b = e.target.closest('.cc-opt'); if (!b) return;
-    paintActive(ccScroll, b.dataset.v);
-    postScroll(b.dataset.v);
   });
 
   const ccTabSwipe = document.getElementById('cc-tabswipe-opts');
@@ -3505,12 +3508,7 @@ HTML = """<!doctype html>
         });
       }
       if ('scrollMode' in msg) paintActive(ccScrollMode, msg.scrollMode);
-      if ('scrollGesture' in msg) {
-        const sv = msg.scrollGesture ? (msg.scrollSens || 'normal') : 'off';
-        paintActive(ccScroll, sv);
-      } else if ('scrollSens' in msg) {
-        paintActive(ccScroll, msg.scrollSens);
-      }
+      if ('scrollSpeed' in msg) paintScrollSpeed(msg.scrollSpeed);
       if ('swipeGesture' in msg) paintActive(ccSwipe, msg.swipeGesture ? 'on' : 'off');
       if ('tabSwipe' in msg || 'tabSwipeAction' in msg) {
         const v = msg.tabSwipe ? (msg.tabSwipeAction || 'tabs') : 'off';
@@ -4047,9 +4045,17 @@ _peace_last_at: float = 0.0          # legacy, unused
 _peace_hold_down: bool = False
 PEACE_HOLD_RELEASE_GRACE_S: float = 0.18  # keep mouse down briefly
 _peace_hold_release_at: float = 0.0       # if hand momentarily lost
+# Push-to-copy: while ✌️ is held, pushing the hand toward the camera
+# (palm scale grows past PUSH_COPY_RATIO of the baseline) fires Cmd+C.
+# Only fires once per peace-hold session; resets on release.
+_peace_push_baseline: Optional[float] = None
+_peace_push_baseline_t: float = 0.0
+_peace_push_fired: bool = False
+PUSH_COPY_BASELINE_S: float = 0.20   # average first ~200ms for baseline
+PUSH_COPY_RATIO: float = 1.32        # 32% bigger ⇒ "shoved at camera"
 
-# Thumbs up 👍 → double-click.
-_thumbs_dclick_enabled: bool = False
+# Thumbs up 👍 → paste (Cmd+V). (Setting name kept for state compat.)
+_thumbs_dclick_enabled: bool = True
 _thumbs_armed: bool = True
 _thumbs_last_at: float = 0.0
 
@@ -4107,6 +4113,11 @@ SCROLL_ZONE_Y_MAX  = 0.85   # both wrists above waist
 SCROLL_FRAME_DEAD  = 0.0015 # ignore per-frame jitter below this
 SCROLL_GAIN_MAP = {"gentle": 80.0, "normal": 180.0, "zippy": 360.0}
 _scroll_sens: str = "normal"
+# Continuous multiplier on top of the base scroll gain. Defaults to 3× so
+# fist-scroll feels comparable to a real trackpad on first run; tweakable
+# from the UI slider (`action: scroll_speed`).
+BASE_SCROLL_GAIN: float = 180.0
+_scroll_sens_mult: float = 3.0
 # Scroll gesture mode. "fist" = close one hand into a fist and move up/down
 # to scroll (new default — works single-handed, cursor freezes while fist
 # is closed). "two_hands" = legacy mode (raise both hands then move them).
@@ -5232,7 +5243,7 @@ def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
     dx = cur[1] - _fist_scroll_prev[1]
     _fist_scroll_prev = cur
 
-    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    gain = BASE_SCROLL_GAIN * _scroll_sens_mult
     v_amt = 0
     h_amt = 0
     if abs(dy) >= SCROLL_FRAME_DEAD:
@@ -5303,7 +5314,7 @@ def _update_head_scroll(hands_list, face_nose, blendshapes,
     # Slowly re-center baseline so the user can "hold" a direction
     # without running out of neck range (drift correction).
     _head_scroll_baseline_y += delta * 0.003
-    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    gain = BASE_SCROLL_GAIN * _scroll_sens_mult
     # Nose y decreases when chin goes up → scroll up (positive amount)
     per_frame = -delta * gain * 0.8
     _head_scroll_accum += per_frame
@@ -5343,7 +5354,7 @@ def _update_brow_scroll(blendshapes, now: float) -> int:
         _scroll_active = False
         return 0
     _scroll_active = True
-    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    gain = BASE_SCROLL_GAIN * _scroll_sens_mult
     _brow_scroll_accum += signal * gain * 0.08
     amt = 0
     if abs(_brow_scroll_accum) >= 1.0:
@@ -5378,7 +5389,7 @@ def _update_two_hand_scroll(hands_list, now: float) -> int:
     _scroll_prev_y = avg
     if abs(dy) < SCROLL_FRAME_DEAD:
         return 0
-    gain = SCROLL_GAIN_MAP.get(_scroll_sens, 180.0)
+    gain = BASE_SCROLL_GAIN * _scroll_sens_mult
     # hands moving up (dy < 0) → scroll up (positive pyautogui amount)
     _scroll_accum += -dy * gain
     if abs(_scroll_accum) < 1.0:
@@ -6109,26 +6120,66 @@ def _detect_peace_rclick(hands_lm_list, now: float) -> bool:
     return _edge_trigger_gesture(match, '_peace_armed', '_peace_last_at', now)
 
 
+def _hand_scale(hand) -> float:
+    """Hand-size proxy: distance from wrist (0) to middle-finger MCP (9).
+    Grows when the hand moves toward the camera, shrinks as it pulls back."""
+    a = hand[0]; b = hand[9]
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+
+
 def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
     """While ✌️ is held, mouse is held down (drag/select). On release,
     mouseUp. Includes a small grace window so a momentarily-lost hand
     doesn't drop the mouse mid-drag.
 
-    Returns 'down' / 'up' on transitions, else None.
+    Also tracks a "push toward camera" gesture during hold: if the hand
+    grows past PUSH_COPY_RATIO of its baseline scale, fires Cmd+C once
+    per hold session (returns 'copy').
+
+    Returns 'down' / 'up' / 'copy' on transitions, else None.
     """
     global _peace_hold_down, _peace_hold_release_at
-    match = bool(hands_lm_list) and any(
-        _is_peace_sign(h) for h in hands_lm_list
-    )
+    global _peace_push_baseline, _peace_push_baseline_t, _peace_push_fired
+    peace_hand = None
+    if hands_lm_list:
+        for h in hands_lm_list:
+            if _is_peace_sign(h):
+                peace_hand = h
+                break
+    match = peace_hand is not None
     if match:
         _peace_hold_release_at = 0.0
         if not _peace_hold_down:
             try:
                 pyautogui.mouseDown(_pause=False)
                 _peace_hold_down = True
+                # reset push tracking for this session
+                _peace_push_baseline = _hand_scale(peace_hand)
+                _peace_push_baseline_t = now
+                _peace_push_fired = False
                 return "down"
             except Exception as e:
                 print(f"[viewer] peace mouseDown failed: {e}", flush=True)
+                return None
+        # already holding — track baseline + push
+        scale = _hand_scale(peace_hand)
+        if (_peace_push_baseline is None
+                or now - _peace_push_baseline_t < PUSH_COPY_BASELINE_S):
+            # still settling — keep the smaller value (rest position)
+            if (_peace_push_baseline is None
+                    or scale < _peace_push_baseline):
+                _peace_push_baseline = scale
+                _peace_push_baseline_t = now
+            return None
+        if (not _peace_push_fired and _peace_push_baseline > 0
+                and scale / _peace_push_baseline >= PUSH_COPY_RATIO):
+            # SHOVE → Cmd+C
+            try:
+                _fire_hotkey("cmd+c")
+                _peace_push_fired = True
+                return "copy"
+            except Exception as e:
+                print(f"[viewer] cmd+c failed: {e}", flush=True)
         return None
     # not matching this frame
     if _peace_hold_down:
@@ -6144,6 +6195,8 @@ def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
             print(f"[viewer] peace mouseUp failed: {e}", flush=True)
         _peace_hold_down = False
         _peace_hold_release_at = 0.0
+        _peace_push_baseline = None
+        _peace_push_fired = False
         return "up"
     return None
 
@@ -6151,6 +6204,7 @@ def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
 def _peace_hold_force_release() -> None:
     """Release any held mouse — call on master-off / disable."""
     global _peace_hold_down, _peace_hold_release_at
+    global _peace_push_baseline, _peace_push_fired
     if _peace_hold_down:
         try:
             pyautogui.mouseUp(_pause=False)
@@ -6158,6 +6212,8 @@ def _peace_hold_force_release() -> None:
             pass
     _peace_hold_down = False
     _peace_hold_release_at = 0.0
+    _peace_push_baseline = None
+    _peace_push_fired = False
 
 
 def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
@@ -6458,21 +6514,24 @@ def _capture_loop() -> None:
                 with _state_lock:
                     _punch_pending.extend(punches)
         # Peace sign ✌️ → press-and-hold the mouse (hold-to-drag).
+        # Push the held ✌️ toward the camera → Cmd+C (copy).
         if _peace_rclick_enabled and _system_enabled:
             evt = _update_peace_hold(hands_lm_list, now)
-            if evt is not None:
+            if evt == "copy":
+                print("[viewer] peace ✌️ + push → cmd+c", flush=True)
+            elif evt is not None:
                 print(f"[viewer] peace ✌️ → mouse {evt}", flush=True)
         else:
             # Safety: drop any held mouse if disabled mid-hold.
             _peace_hold_force_release()
-        # Thumbs up 👍 → double-click
+        # Thumbs up 👍 → paste (Cmd+V).
         if (_thumbs_dclick_enabled and _system_enabled
                 and _detect_thumbs_dclick(hands_lm_list, now)):
-            print("[viewer] thumbs 👍 → double-click", flush=True)
+            print("[viewer] thumbs 👍 → cmd+v", flush=True)
             try:
-                pyautogui.doubleClick(_pause=False)
+                _fire_hotkey("cmd+v")
             except Exception as e:
-                print(f"[viewer] doubleClick failed: {e}", flush=True)
+                print(f"[viewer] cmd+v failed: {e}", flush=True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
@@ -6894,6 +6953,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _wispr_method, _scroll_sens, _scroll_mode
         global _right_click_method, _double_click_on, _cursor_sens
         global _scroll_gesture_enabled, _swipe_gesture_enabled
+        global _scroll_sens_mult
 
         # Local speech-to-text + command dispatch. Browser POSTs the raw
         # audio blob (webm/opus from MediaRecorder) here; we transcribe
@@ -7067,6 +7127,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "wispr": _wispr_method,
                         "scrollSens": _scroll_sens,
                         "scrollMode": _scroll_mode,
+                        "scrollSpeed": round(_scroll_sens_mult, 2),
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
                         "cursorSens": round(_cursor_sens, 2),
@@ -7133,6 +7194,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "ok": True,
                         "scrollSens": (_scroll_sens
                                        if _scroll_gesture_enabled else "off"),
+                    }).encode(),
+                )
+                return
+            if action == "scroll_speed":
+                # Continuous multiplier on the base scroll gain. UI slider
+                # in the control center sends a float here.
+                try:
+                    v = float(data.get("value", _scroll_sens_mult))
+                except (TypeError, ValueError):
+                    v = _scroll_sens_mult
+                _scroll_sens_mult = max(0.3, min(8.0, v))
+                print(f"[viewer] scroll speed = {_scroll_sens_mult:.2f}×",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True,
+                        "scrollSpeed": round(_scroll_sens_mult, 2),
                     }).encode(),
                 )
                 return
@@ -7544,6 +7623,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "wispr": _wispr_method,
                         "scrollSens": _scroll_sens,
                         "scrollMode": _scroll_mode,
+                        "scrollSpeed": round(_scroll_sens_mult, 2),
                         "rightClick": _right_click_method,
                         "doubleClick": _double_click_on,
                         "cursorSens": round(_cursor_sens, 2),
