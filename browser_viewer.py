@@ -562,6 +562,118 @@ BOXING_HTML = r"""<!doctype html>
     text-shadow: 0 2px 0 #000; }
   #round small { display:block; font-size:11px; letter-spacing:0.3em; color:#888;
     font-family: ui-monospace, Menlo, monospace; }
+
+  /* === McGregor fights back === */
+  #target {
+    /* Smooth roam to new positions */
+    transition: left 600ms cubic-bezier(.4,1.3,.5,1),
+                top  600ms cubic-bezier(.4,1.3,.5,1),
+                transform 120ms cubic-bezier(.2,1.4,.4,1);
+  }
+  #target.bob { animation: bob 1.6s ease-in-out infinite; }
+  @keyframes bob {
+    0%,100% { transform: translate(-50%,-50%) scale(1) rotate(-2deg); }
+    50%     { transform: translate(-50%,-54%) scale(1.02) rotate(2deg); }
+  }
+  /* Speech bubble taunts */
+  #taunt {
+    position: absolute; z-index: 9; pointer-events:none;
+    background:#fff; color:#111; padding:10px 16px;
+    border-radius: 18px; font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 28px; letter-spacing:0.04em;
+    box-shadow: 0 4px 0 #000, 0 0 0 3px #000;
+    opacity: 0; transition: opacity 200ms ease-out;
+    max-width: 320px; text-align: center;
+    transform: translate(-50%, -50%);
+  }
+  #taunt.show { opacity: 1; }
+  #taunt::after {
+    content:""; position:absolute; left:50%; bottom:-14px;
+    transform: translateX(-50%);
+    border: 8px solid transparent; border-top: 14px solid #000;
+  }
+  /* User HP bar (bottom) */
+  #user-hp-wrap {
+    position: absolute; left: 50%; bottom: 70px;
+    transform: translateX(-50%);
+    width: 320px; height: 14px; z-index: 11;
+    background: #060616; border: 2px solid #000; border-radius:8px;
+    overflow: hidden;
+  }
+  #user-hp { width:100%; height:100%;
+    background: linear-gradient(90deg, #70b4ec, #6ee7b7);
+    transition: width 260ms ease-out;
+  }
+  #user-hp-label {
+    position:absolute; left:50%; bottom: 90px; transform:translateX(-50%);
+    z-index:11; font-size:11px; letter-spacing:0.3em; color:#88a;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  /* Incoming-punch warning arrow */
+  .incoming {
+    position: absolute; z-index: 7; pointer-events:none;
+    font-size: 80px; line-height:1;
+    filter: drop-shadow(0 0 18px rgba(255,77,77,0.8));
+    transform: translate(-50%,-50%) scale(0.4);
+    opacity: 0;
+  }
+  .incoming.warn { animation: warn 700ms ease-out forwards; }
+  .incoming.swoop { animation: swoop 480ms cubic-bezier(.6,.05,.9,.6) forwards; }
+  @keyframes warn {
+    0%   { opacity: 0; transform: translate(-50%,-50%) scale(0.4); }
+    50%  { opacity: 1; transform: translate(-50%,-50%) scale(1.2); }
+    100% { opacity: 0.9; transform: translate(-50%,-50%) scale(1.0); }
+  }
+  @keyframes swoop {
+    0%   { opacity: 1; transform: translate(-50%,-50%) scale(1.0); }
+    100% { opacity: 0; transform: translate(-50%, calc(-50% + 60vh))
+                                   scale(6) rotate(8deg); }
+  }
+  /* Block / dodge indicator */
+  .blocked {
+    position: absolute; z-index: 9; pointer-events:none;
+    font-size: 96px; font-weight: 900;
+    -webkit-text-stroke: 4px #000;
+    color: var(--cool);
+    text-shadow: 6px 6px 0 #1d6c4a, 12px 12px 0 #000;
+    transform: translate(-50%,-50%) scale(0.4);
+    opacity: 0;
+    animation: blocked 700ms cubic-bezier(.2,1.6,.4,1) forwards;
+  }
+  @keyframes blocked {
+    0%   { opacity: 0; transform: translate(-50%,-50%) scale(0.3) rotate(-10deg); }
+    25%  { opacity: 1; transform: translate(-50%,-50%) scale(1.3) rotate(5deg); }
+    100% { opacity: 0; transform: translate(-50%,-50%) scale(1.1) rotate(0)
+                                   translateY(-30px); }
+  }
+  /* KO cinematic overlay */
+  body.ko::before {
+    content: "K.O.";
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(255,77,77,0.35);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 240px; font-weight: 900; letter-spacing: 0.08em;
+    -webkit-text-stroke: 8px #000;
+    text-shadow: 14px 14px 0 #000;
+    animation: ko 1.6s cubic-bezier(.2,1.4,.4,1) forwards;
+    pointer-events: none;
+  }
+  @keyframes ko {
+    0%   { opacity: 0; transform: scale(0.4) rotate(-8deg); }
+    25%  { opacity: 1; transform: scale(1.2) rotate(2deg); }
+    80%  { opacity: 1; transform: scale(1.0) rotate(0); }
+    100% { opacity: 0; transform: scale(1.05); }
+  }
+  /* Combo callouts */
+  #combo {
+    position: absolute; left: 50%; top: 130px;
+    transform: translateX(-50%); z-index: 10;
+    font-size: 36px; color: var(--warm); letter-spacing: 0.18em;
+    text-shadow: 0 2px 0 #000, 0 0 18px rgba(245,194,74,0.6);
+    opacity: 0; transition: opacity 260ms ease-out;
+    pointer-events:none; font-weight: 900;
+  }
+  #combo.show { opacity: 1; }
 </style>
 </head>
 <body>
@@ -579,6 +691,10 @@ BOXING_HTML = r"""<!doctype html>
       <div>peak   <span id="s-peak">0.0</span></div>
     </div>
     <div id="round">3:00<small>round 1</small></div>
+    <div id="combo"></div>
+    <div id="taunt"></div>
+    <div id="user-hp-label">YOUR HP</div>
+    <div id="user-hp-wrap"><div id="user-hp"></div></div>
     <div id="title">🥊 MUAY THAI · YOLO MODE</div>
     <div class="toolbar">
       <button class="btn on" id="tog-detect">detect: on</button>
@@ -799,6 +915,253 @@ BOXING_HTML = r"""<!doctype html>
       elRound.firstChild.nodeValue = fmt(roundT);
     }
   }, 1000);
+
+  // ============================================================
+  // === McGREGOR FIGHTS BACK ===================================
+  // ============================================================
+
+  // -- Moving target: roam to a random spot in the safe zone ---
+  elTarget.classList.add('bob');
+  function roamTarget() {
+    // Stay inside 18%–82% horizontally, 22%–62% vertically
+    const x = 18 + Math.random() * 64;
+    const y = 22 + Math.random() * 40;
+    elTarget.style.left = x + '%';
+    elTarget.style.top  = y + '%';
+    // Move HP bar with the target
+    document.getElementById('hp-wrap').style.left = x + '%';
+    document.getElementById('hp-wrap').style.top  = (y - 18) + '%';
+  }
+  function scheduleRoam() {
+    const delay = 2200 + Math.random() * 2800;
+    setTimeout(() => { roamTarget(); scheduleRoam(); }, delay);
+  }
+  // Anchor HP bar to follow target via fixed offsets, then start roaming
+  const hpWrap = document.getElementById('hp-wrap');
+  hpWrap.style.transition = 'left 600ms cubic-bezier(.4,1.3,.5,1), top 600ms cubic-bezier(.4,1.3,.5,1)';
+  hpWrap.style.transform = 'translate(-50%, 0)';
+  setTimeout(scheduleRoam, 1500);
+
+  // -- Speech-bubble taunts -----------------------------------
+  const TAUNTS = [
+    "is that all ya got?",
+    "you're nothing!",
+    "left hand, sleep!",
+    "hit me harder, kid",
+    "wake up!",
+    "i bend the knee for nobody",
+    "swing again, cupcake",
+    "too slow!",
+    "try the other hand",
+    "you call that a hook?",
+    "i'm right here",
+    "where's the heat?",
+    "i've taken naps harder",
+    "easy money",
+  ];
+  const KO_LINES = [
+    "lights out, kid",
+    "and STILL!",
+    "told ya",
+    "any time, any place",
+  ];
+  const elTaunt = document.getElementById('taunt');
+  let tauntT = null;
+  function showTaunt(text) {
+    elTaunt.textContent = text;
+    // place above target's current position
+    const r = elTarget.getBoundingClientRect();
+    elTaunt.style.left = (r.left + r.width/2) + 'px';
+    elTaunt.style.top  = (r.top - 30) + 'px';
+    elTaunt.classList.add('show');
+    if (tauntT) clearTimeout(tauntT);
+    tauntT = setTimeout(() => elTaunt.classList.remove('show'), 1800);
+  }
+  function scheduleTaunt() {
+    const delay = 4500 + Math.random() * 4500;
+    setTimeout(() => {
+      if (!document.body.classList.contains('ko')) {
+        showTaunt(TAUNTS[Math.floor(Math.random()*TAUNTS.length)]);
+      }
+      scheduleTaunt();
+    }, delay);
+  }
+  setTimeout(scheduleTaunt, 3500);
+
+  // -- USER HP + KO cinematic ---------------------------------
+  let userHp = 100;
+  const elUserHp = document.getElementById('user-hp');
+  function updateUserHp() {
+    elUserHp.style.width = Math.max(0, userHp) + '%';
+    if (userHp <= 0) youGotKod();
+  }
+  function youGotKod() {
+    if (document.body.classList.contains('ko')) return;
+    document.body.classList.add('ko');
+    showTaunt(KO_LINES[Math.floor(Math.random()*KO_LINES.length)]);
+    if (soundOn) {
+      // big descending boom + bell
+      const ctx = ac();
+      if (ctx) {
+        const t0 = ctx.currentTime;
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(220, t0);
+        o.frequency.exponentialRampToValueAtTime(35, t0 + 1.2);
+        g.gain.setValueAtTime(0.4, t0);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + 1.4);
+        o.connect(g).connect(ctx.destination);
+        o.start(t0); o.stop(t0+1.4);
+      }
+      bell();
+    }
+    setTimeout(() => {
+      document.body.classList.remove('ko');
+      userHp = 100; updateUserHp();
+    }, 2400);
+  }
+
+  // -- Incoming counter-punches: warn → swoop, dodge by punching --
+  // Track recent punches so we can detect "block" within window.
+  const recentPunches = []; // timestamps (ms)
+  function noteBlockAttempt() { recentPunches.push(performance.now()); }
+  function blockedRecently(windowMs) {
+    const now = performance.now();
+    while (recentPunches.length && now - recentPunches[0] > 1500) {
+      recentPunches.shift();
+    }
+    return recentPunches.some(t => now - t < windowMs);
+  }
+
+  function spawnIncoming() {
+    if (document.body.classList.contains('ko')) return;
+    if (!detect) return;
+    // origin = where target is; trajectory = down toward camera
+    const r = elTarget.getBoundingClientRect();
+    const ox = r.left + r.width/2;
+    const oy = r.top  + r.height/2;
+    const types = ['🥊','👊','🦶']; // punch / fist / kick
+    const glyph = types[Math.floor(Math.random()*types.length)];
+
+    // Warning glyph appears at target
+    const warn = document.createElement('div');
+    warn.className = 'incoming warn';
+    warn.textContent = '⚠️';
+    warn.style.left = ox + 'px';
+    warn.style.top  = oy + 'px';
+    STAGE.appendChild(warn);
+
+    // Warning whoosh sound
+    if (soundOn) {
+      const ctx = ac();
+      if (ctx) {
+        const t0 = ctx.currentTime;
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.type='sawtooth';
+        o.frequency.setValueAtTime(300, t0);
+        o.frequency.exponentialRampToValueAtTime(800, t0+0.5);
+        g.gain.setValueAtTime(0.0, t0);
+        g.gain.linearRampToValueAtTime(0.10, t0+0.05);
+        g.gain.exponentialRampToValueAtTime(0.001, t0+0.55);
+        o.connect(g).connect(ctx.destination);
+        o.start(t0); o.stop(t0+0.6);
+      }
+    }
+
+    // 600ms warning window, then projectile launches
+    setTimeout(() => {
+      warn.remove();
+      const proj = document.createElement('div');
+      proj.className = 'incoming swoop';
+      proj.textContent = glyph;
+      proj.style.left = ox + 'px';
+      proj.style.top  = oy + 'px';
+      STAGE.appendChild(proj);
+
+      // Impact resolves at end of swoop
+      setTimeout(() => {
+        proj.remove();
+        // Did the user throw a punch in the dodge window? (≤900ms)
+        if (blockedRecently(900)) {
+          // BLOCKED!
+          const b = document.createElement('div');
+          b.className = 'blocked';
+          b.textContent = 'BLOCKED!';
+          b.style.left = (window.innerWidth/2) + 'px';
+          b.style.top  = (window.innerHeight - 200) + 'px';
+          STAGE.appendChild(b);
+          setTimeout(() => b.remove(), 720);
+          // tiny chime
+          if (soundOn) {
+            const ctx = ac();
+            if (ctx) {
+              const t0 = ctx.currentTime;
+              const o = ctx.createOscillator(); const g = ctx.createGain();
+              o.type='triangle';
+              o.frequency.setValueAtTime(1200, t0);
+              o.frequency.exponentialRampToValueAtTime(2000, t0+0.15);
+              g.gain.setValueAtTime(0.18, t0);
+              g.gain.exponentialRampToValueAtTime(0.001, t0+0.2);
+              o.connect(g).connect(ctx.destination);
+              o.start(t0); o.stop(t0+0.22);
+            }
+          }
+        } else {
+          // HIT — user takes damage
+          const dmg = 8 + Math.random()*10;
+          userHp = Math.max(0, userHp - dmg);
+          updateUserHp();
+          // red flash + heavy shake
+          flashScreen();
+          // low impact thump
+          thump(0.9, 'hook');
+          // also trigger a stronger camera shake
+          document.body.classList.remove('shake');
+          void document.body.offsetWidth;
+          document.body.classList.add('shake');
+          setTimeout(() => document.body.classList.remove('shake'), 280);
+        }
+      }, 480);
+    }, 600);
+  }
+  function scheduleIncoming() {
+    // Difficulty ramps with round number — interval shrinks 5–9s → 3–6s
+    const base = Math.max(3000, 5000 - (roundN-1)*800);
+    const delay = base + Math.random() * 4000;
+    setTimeout(() => {
+      spawnIncoming();
+      scheduleIncoming();
+    }, delay);
+  }
+  setTimeout(scheduleIncoming, 6000);
+  updateUserHp();
+
+  // -- Combo tracker ------------------------------------------
+  const elCombo = document.getElementById('combo');
+  let comboCount = 0;
+  let comboTimer = null;
+  function bumpCombo() {
+    comboCount++;
+    if (comboCount >= 3) {
+      elCombo.textContent = comboCount + '× COMBO!';
+      elCombo.classList.add('show');
+    }
+    if (comboTimer) clearTimeout(comboTimer);
+    comboTimer = setTimeout(() => {
+      elCombo.classList.remove('show');
+      comboCount = 0;
+    }, 1400);
+  }
+
+  // -- Hook into existing punch handler -----------------------
+  // Wrap the SSE path so each user punch also notes a block-attempt
+  // and bumps the combo counter. We do this by overriding hitTarget.
+  const _origHitTarget = hitTarget;
+  hitTarget = function(type, intensity) {
+    noteBlockAttempt();
+    bumpCombo();
+    return _origHitTarget(type, intensity);
+  };
 </script>
 </body></html>
 """
