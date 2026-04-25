@@ -1230,6 +1230,12 @@ HTML = """<!doctype html>
     border-radius:999px; border:1px solid #2a2a38; background:#15151c;
     color:var(--dim); }
   #vt-btn.on { background:#6ee7b7; color:#05170f; border-color:#6ee7b7; }
+  #box-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
+    text-transform:uppercase; font-weight:700; padding:6px 14px;
+    border-radius:999px; border:1px solid #5a2222; background:#1a0808;
+    color:#ff8a8a; font-family: inherit; }
+  #box-btn:hover { background:#2a0c0c; border-color:#ff4d4d;
+    color:#ffd4d4; box-shadow: 0 0 14px rgba(255,77,77,0.25); }
   #jam-btn, #cc-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
     text-transform:uppercase; font-weight:700; padding:6px 14px;
     border-radius:999px; border:1px solid #2a2a38; background:#15151c;
@@ -1412,6 +1418,9 @@ HTML = """<!doctype html>
     <button id="cc-btn"  type="button">control center</button>
     <button id="vt-btn"  type="button">voice test</button>
     <button id="jam-btn" type="button">jam mode</button>
+    <button id="box-btn" type="button"
+      title="Open 🥊 Muay Thai mode in a new tab — punch McGregor, take some hits, have fun."
+      onclick="window.open('/boxing','_blank')">🥊 fight mode</button>
     <button id="master-btn" type="button" title="Master on/off. Double-clap also toggles."
       style="font-size:11px; letter-spacing:0.18em; font-weight:800;
              padding:8px 18px; border-radius:999px; border:1px solid;">
