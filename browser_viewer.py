@@ -5114,11 +5114,31 @@ def _release_wispr_key() -> None:
     _release_wispr_key_up()
 
 
+def _set_system_mute(mute: bool) -> None:
+    """Mute / unmute system audio output via osascript. Fired in a
+    daemon thread so the capture loop never blocks on osascript."""
+    def _go():
+        try:
+            arg = ("set volume with output muted" if mute
+                   else "set volume without output muted")
+            subprocess.run(
+                ["osascript", "-e", arg],
+                check=False, timeout=2.0,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def _set_master(on: bool, source: str = "") -> None:
     """Master on/off — drives _system_enabled and _cursor_enabled together.
-    When turning on, re-calibrates cursor so head position is re-centered."""
+    When turning on, re-calibrates cursor so head position is re-centered.
+    Auto-mutes system audio in timeout (off), unmutes on resume."""
     global _system_enabled, _cursor_enabled, _cursor_calibrated
     global _cursor_calib_start, _finger_center, _gaze_center
+    was_on = _system_enabled
     _system_enabled = bool(on)
     _cursor_enabled = bool(on)
     if on:
@@ -5126,6 +5146,10 @@ def _set_master(on: bool, source: str = "") -> None:
         _cursor_calib_start = time.time()
         _finger_center = None
         _gaze_center = None
+        # Resume from timeout — unmute (only if we toggled, not on a
+        # boot-time call where state didn't change).
+        if not was_on:
+            _set_system_mute(False)
     else:
         # Ensure any held dictation key isn't stuck after a hard off.
         _release_wispr_key_up()
@@ -5133,6 +5157,10 @@ def _set_master(on: bool, source: str = "") -> None:
         _mouth_hold_release()
         # Release any mouse button held via peace ✌️ hold-to-drag.
         _peace_hold_force_release()
+        # Timeout = silence: mute system audio so videos / music pause
+        # being audible while the user is heads-down.
+        if was_on:
+            _set_system_mute(True)
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
