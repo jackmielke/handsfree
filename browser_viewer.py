@@ -41,6 +41,7 @@ try:
     from Quartz import (
         CGEventCreateKeyboardEvent,
         CGEventCreateMouseEvent,
+        CGEventCreateScrollWheelEvent,
         CGEventPost,
         CGEventSetFlags,
         CGWarpMouseCursorPosition,
@@ -49,6 +50,7 @@ try:
         kCGEventMouseMoved,
         kCGHIDEventTap,
         kCGMouseButtonLeft,
+        kCGScrollEventUnitPixel,
     )
     _QUARTZ_OK = True
     # Re-associate OS cursor with the mouse so warp placements aren't
@@ -1475,7 +1477,7 @@ HTML = """<!doctype html>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Hold mouth open = press-and-hold the mouse button">mouth hold</button>
-        <button class="cc-opt" data-exp="peace_rclick" title="Flash a peace sign ✌️ to right-click">✌️ right-click</button>
+        <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to double-click">👍 double-click</button>
         <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
         <button class="cc-opt" id="cc-atelier-manual" title="Force atelier mode on/off without doing the pose">atelier: off</button>
@@ -4035,10 +4037,16 @@ T_GESTURE_COOLDOWN_S: float = 1.2
 _mouth_hold_enabled: bool = False
 _mouth_hold_down: bool = False
 
-# Peace sign ✌️ → right-click (edge-triggered, armed like pinch).
-_peace_rclick_enabled: bool = False
-_peace_armed: bool = True
-_peace_last_at: float = 0.0
+# Peace sign ✌️ → press-and-hold the mouse (hold-to-drag).
+# While ✌️ is shown, mouse stays down; release → mouseUp.
+# Lets you select text + drag in Figma without a rogue press-and-hold
+# from any other gesture (e.g. mouth-hold) firing accidentally.
+_peace_rclick_enabled: bool = True   # name kept for setting compat
+_peace_armed: bool = True            # legacy, unused
+_peace_last_at: float = 0.0          # legacy, unused
+_peace_hold_down: bool = False
+PEACE_HOLD_RELEASE_GRACE_S: float = 0.18  # keep mouse down briefly
+_peace_hold_release_at: float = 0.0       # if hand momentarily lost
 
 # Thumbs up 👍 → double-click.
 _thumbs_dclick_enabled: bool = False
@@ -5060,6 +5068,8 @@ def _set_master(on: bool, source: str = "") -> None:
         _release_wispr_key_up()
         # Release any mouse button held via mouth-hold experiment.
         _mouth_hold_release()
+        # Release any mouse button held via peace ✌️ hold-to-drag.
+        _peace_hold_force_release()
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
@@ -5231,7 +5241,12 @@ def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
             v_amt = int(_fist_scroll_accum_y)
             _fist_scroll_accum_y -= v_amt
     if abs(dx) >= SCROLL_FRAME_DEAD:
-        _fist_scroll_accum_x += -dx * (gain / 3.0)
+        # Horizontal channel was previously gain/3 (too soft). Figma's
+        # horizontal pan needs comparable throw to vertical to feel right,
+        # so we use gain/1.5 — still slightly damped vs vertical because
+        # wrist x-jitter is noisier than y-jitter, but close enough that
+        # the diagonal grab-pan feels intuitive.
+        _fist_scroll_accum_x += -dx * (gain / 1.5)
         if abs(_fist_scroll_accum_x) >= 1.0:
             h_amt = int(_fist_scroll_accum_x)
             _fist_scroll_accum_x -= h_amt
@@ -6084,11 +6099,65 @@ def _edge_trigger_gesture(match: bool, armed_flag: str, last_at_flag: str,
 
 
 def _detect_peace_rclick(hands_lm_list, now: float) -> bool:
+    """Legacy edge-trigger right-click; kept for callers that haven't
+    migrated. Peace is now a press-and-hold gesture — see
+    `_update_peace_hold`."""
     if not hands_lm_list:
         globals()['_peace_armed'] = True
         return False
     match = any(_is_peace_sign(h) for h in hands_lm_list)
     return _edge_trigger_gesture(match, '_peace_armed', '_peace_last_at', now)
+
+
+def _update_peace_hold(hands_lm_list, now: float) -> Optional[str]:
+    """While ✌️ is held, mouse is held down (drag/select). On release,
+    mouseUp. Includes a small grace window so a momentarily-lost hand
+    doesn't drop the mouse mid-drag.
+
+    Returns 'down' / 'up' on transitions, else None.
+    """
+    global _peace_hold_down, _peace_hold_release_at
+    match = bool(hands_lm_list) and any(
+        _is_peace_sign(h) for h in hands_lm_list
+    )
+    if match:
+        _peace_hold_release_at = 0.0
+        if not _peace_hold_down:
+            try:
+                pyautogui.mouseDown(_pause=False)
+                _peace_hold_down = True
+                return "down"
+            except Exception as e:
+                print(f"[viewer] peace mouseDown failed: {e}", flush=True)
+        return None
+    # not matching this frame
+    if _peace_hold_down:
+        # start the grace timer; only release if it expires
+        if _peace_hold_release_at == 0.0:
+            _peace_hold_release_at = now
+            return None
+        if now - _peace_hold_release_at < PEACE_HOLD_RELEASE_GRACE_S:
+            return None
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception as e:
+            print(f"[viewer] peace mouseUp failed: {e}", flush=True)
+        _peace_hold_down = False
+        _peace_hold_release_at = 0.0
+        return "up"
+    return None
+
+
+def _peace_hold_force_release() -> None:
+    """Release any held mouse — call on master-off / disable."""
+    global _peace_hold_down, _peace_hold_release_at
+    if _peace_hold_down:
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+    _peace_hold_down = False
+    _peace_hold_release_at = 0.0
 
 
 def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
@@ -6388,14 +6457,14 @@ def _capture_loop() -> None:
             if punches:
                 with _state_lock:
                     _punch_pending.extend(punches)
-        # Peace sign ✌️ → right-click
-        if (_peace_rclick_enabled and _system_enabled
-                and _detect_peace_rclick(hands_lm_list, now)):
-            print("[viewer] peace ✌️ → right-click", flush=True)
-            try:
-                pyautogui.rightClick(_pause=False)
-            except Exception as e:
-                print(f"[viewer] rightClick failed: {e}", flush=True)
+        # Peace sign ✌️ → press-and-hold the mouse (hold-to-drag).
+        if _peace_rclick_enabled and _system_enabled:
+            evt = _update_peace_hold(hands_lm_list, now)
+            if evt is not None:
+                print(f"[viewer] peace ✌️ → mouse {evt}", flush=True)
+        else:
+            # Safety: drop any held mouse if disabled mid-hold.
+            _peace_hold_force_release()
         # Thumbs up 👍 → double-click
         if (_thumbs_dclick_enabled and _system_enabled
                 and _detect_thumbs_dclick(hands_lm_list, now)):
@@ -6420,12 +6489,25 @@ def _capture_loop() -> None:
                 _swipe_pending = f"tab-{tab_dir}"
         if _scroll_mode == "fist":
             v_amt, h_amt = _update_fist_scroll(hands_lm_list, now)
-            if _system_enabled and _scroll_gesture_enabled:
+            if _system_enabled and _scroll_gesture_enabled and (v_amt or h_amt):
+                # Emit a single native two-axis scroll event so Figma sees
+                # diagonal pans like a real trackpad does. Falls back to
+                # pyautogui if Quartz isn't available.
                 try:
-                    if v_amt:
-                        pyautogui.scroll(v_amt, _pause=False)
-                    if h_amt:
-                        pyautogui.hscroll(h_amt, _pause=False)
+                    if _QUARTZ_OK:
+                        ev = CGEventCreateScrollWheelEvent(
+                            None,
+                            kCGScrollEventUnitPixel,
+                            2,             # axis count
+                            int(v_amt),    # axis 1 = vertical
+                            int(h_amt),    # axis 2 = horizontal
+                        )
+                        CGEventPost(kCGHIDEventTap, ev)
+                    else:
+                        if v_amt:
+                            pyautogui.scroll(v_amt, _pause=False)
+                        if h_amt:
+                            pyautogui.hscroll(h_amt, _pause=False)
                 except Exception as e:
                     print(f"[viewer] fist-scroll failed: {e}", flush=True)
         elif _scroll_mode == "two_hands":
@@ -7164,7 +7246,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 global _peace_rclick_enabled, _peace_armed
                 _peace_rclick_enabled = bool(data.get("on"))
                 _peace_armed = True
-                print(f"[viewer] peace-rclick = {_peace_rclick_enabled}", flush=True)
+                if not _peace_rclick_enabled:
+                    _peace_hold_force_release()
+                print(f"[viewer] peace-hold = {_peace_rclick_enabled}", flush=True)
                 self._write_status(
                     200, "application/json",
                     json.dumps({"ok": True, "peaceRclick": _peace_rclick_enabled}).encode(),
