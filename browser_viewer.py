@@ -1508,8 +1508,9 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#fbbf24;">🙏 wispr quickstart</div>
       <div class="cc-opts" id="cc-wispr-preset-opts">
         <button class="cc-opt" data-preset="menu_toggle"
-          title="Prayer hands click Wispr's menu bar icon to START listening. Un-pray clicks it again to STOP. Most reliable.">
-          pray → toggle (menu)
+          title="Prayer hands click Wispr's menu bar icon to START listening. Un-pray clicks it again to STOP. RECOMMENDED — uses the same path as clicking the icon yourself."
+          style="border-color:#fbbf24;">
+          🌟 pray → click icon (recommended)
         </button>
         <button class="cc-opt" data-preset="f19_double_toggle"
           title="Pray = double-tap F19. Requires F19 bound in Wispr + 'double-tap to toggle' enabled.">
@@ -1543,6 +1544,26 @@ HTML = """<!doctype html>
           title="Disable prayer → Wispr entirely">
           off
         </button>
+      </div>
+    </div>
+    <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
+      <div class="cc-label" style="color:#fbbf24;">🧪 wispr test</div>
+      <div class="cc-opts" id="cc-wispr-test-opts">
+        <button class="cc-opt" id="cc-wispr-fire"
+          title="Fire the menu-bar click NOW. Use this twice in a row to verify start → stop works without doing the prayer gesture.">
+          fire menu click
+        </button>
+        <button class="cc-opt" id="cc-wispr-probe"
+          title="Print Wispr's menu-bar layout to the result area below. Useful if the click isn't landing.">
+          probe menu
+        </button>
+        <div id="cc-wispr-result" style="font-family:ui-monospace,Menlo,monospace;
+             font-size:10px; color:var(--dim); margin-left:8px;
+             max-height:120px; overflow:auto; white-space:pre;
+             flex:1; min-width:200px; padding:4px 8px;
+             background:#0a0a0f; border-radius:6px; border:1px dashed #333;">
+          (test results appear here)
+        </div>
       </div>
     </div>
     <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
@@ -2608,6 +2629,42 @@ HTML = """<!doctype html>
       b.classList.toggle('on', b.dataset.preset === key);
     });
   }
+  // 🧪 Wispr test panel — fire the menu click manually + probe the menu layout.
+  const ccWisprResult = document.getElementById('cc-wispr-result');
+  const ccWisprFire   = document.getElementById('cc-wispr-fire');
+  const ccWisprProbe  = document.getElementById('cc-wispr-probe');
+  function showWisprResult(text) {
+    if (!ccWisprResult) return;
+    ccWisprResult.textContent = text;
+    ccWisprResult.style.color = text.startsWith('OK')
+      ? 'var(--accent)'
+      : (text.startsWith('ERR') ? '#ff8a8a' : 'var(--ink)');
+  }
+  if (ccWisprFire) {
+    ccWisprFire.addEventListener('click', async () => {
+      showWisprResult('firing…');
+      try {
+        const r = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'wispr_fire_menu' }) });
+        const j = await r.json();
+        showWisprResult(j.result || 'no result');
+      } catch (e) { showWisprResult('ERR ' + e.message); }
+    });
+  }
+  if (ccWisprProbe) {
+    ccWisprProbe.addEventListener('click', async () => {
+      showWisprResult('probing…');
+      try {
+        const r = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'wispr_probe' }) });
+        const j = await r.json();
+        showWisprResult(j.result || 'no result');
+      } catch (e) { showWisprResult('ERR ' + e.message); }
+    });
+  }
+
   if (ccWisprPreset) {
     ccWisprPreset.addEventListener('click', async (e) => {
       const b = e.target.closest('.cc-opt'); if (!b) return;
@@ -4076,7 +4133,7 @@ _click_method: str = "mouth"      # primary (left) click gesture
 _cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
 _double_click_on: bool = False    # double-tap primary within DBL window → double-click
-_wispr_method: str = "off"  # "applescript_fn"|"cgevent_f19"|"cgevent_fn"|"all"|"apple_dictation"|"off"
+_wispr_method: str = "menu_click"  # default: AppleScript click on Wispr menu icon — most reliable
 # If True: after releasing a held Fn key, also fire a fresh tap. Useful when
 # Wispr treats Fn as a toggle and the key-up alone doesn't stop recording.
 _wispr_release_extra_tap: bool = False
@@ -4312,7 +4369,7 @@ _prayer_hands_lost_since: Optional[float] = None
 # often occludes the other). "fingertips" (index tips touch — more robust
 # because hands don't overlap). "fist" (one-handed closed fist — single-hand,
 # no tracker fights). "off" disables gesture-triggered dictation entirely.
-_dict_gesture = "off"
+_dict_gesture = "prayer"  # default: prayer-hands gesture drives Wispr
 
 # How the gesture maps to Wispr/dictation key events:
 #   "hold"  — press down on gesture ENTER, release on gesture EXIT
@@ -4998,37 +5055,156 @@ def _double_tap_cgevent(keycode: int, fn_flag: bool = False,
     print(f"[viewer] wispr double-tap (key={keycode} fn={fn_flag})", flush=True)
 
 
-def _tap_wispr_menu_click() -> None:
+_WISPR_MENU_HINT: Optional[tuple] = None  # (menu_bar_index, item_index)
+
+
+def _tap_wispr_menu_click() -> str:
     """Toggle Wispr Flow by clicking its menu bar icon via System Events.
-    Works without any keyboard-injection layer — needs Accessibility
-    permission for the process running handsfree. Universal fallback."""
-    script = '''
+    Iterates every menu-bar item of the Wispr Flow process and clicks
+    the first one that responds. Caches the winning (mb, item) so
+    subsequent calls are fast.
+
+    Returns a short status string for logging / toasts.
+    """
+    global _WISPR_MENU_HINT
+    hint_clause = ""
+    if _WISPR_MENU_HINT is not None:
+        mb, it = _WISPR_MENU_HINT
+        hint_clause = (
+            f'try\n'
+            f'  click menu bar item {it} of menu bar {mb}\n'
+            f'  return "OK cached mb={mb} item={it}"\n'
+            f'end try\n'
+        )
+    script = f'''
 tell application "System Events"
-  if exists (process "Wispr Flow") then
-    tell process "Wispr Flow"
-      try
-        click menu bar item 1 of menu bar 2
-        return "clicked menu bar 2 item 1"
-      on error
-        try
-          click menu bar item 1 of menu bar 1
-          return "clicked menu bar 1 item 1"
-        end try
-      end try
-    end tell
-  else
-    return "Wispr Flow not running"
+  if not (exists (process "Wispr Flow")) then
+    return "ERR Wispr Flow not running — open the app once"
   end if
+  tell process "Wispr Flow"
+    {hint_clause}
+    set lastErr to ""
+    -- Pass 1: click the status-menu item (the menu-extra in the right
+    -- side of the system menu bar). That's Wispr's mic toggle. Skip
+    -- application menus like Apple/File/Edit which are also clickable
+    -- but open dropdowns instead of toggling dictation.
+    set mbCount to count of menu bars
+    repeat with mbi from 1 to mbCount
+      try
+        set itemCount to count of menu bar items of menu bar mbi
+      on error
+        set itemCount to 0
+      end try
+      repeat with itx from 1 to itemCount
+        try
+          set itm to menu bar item itx of menu bar mbi
+          set d to ""
+          try
+            set d to (description of itm as string)
+          end try
+          if d is "status menu" then
+            try
+              click itm
+              return "OK mb=" & mbi & " item=" & itx & " (status menu)"
+            on error e
+              set lastErr to e
+            end try
+          end if
+        end try
+      end repeat
+    end repeat
+    -- Pass 2 (fallback): click any menu-extra (mb 2+) item, since the
+    -- system menu bar is mb 1 and menu extras live in mb 2 on macOS.
+    if mbCount >= 2 then
+      repeat with mbi from 2 to mbCount
+        try
+          set itemCount to count of menu bar items of menu bar mbi
+        on error
+          set itemCount to 0
+        end try
+        repeat with itx from 1 to itemCount
+          try
+            click menu bar item itx of menu bar mbi
+            return "OK mb=" & mbi & " item=" & itx & " (fallback)"
+          on error e
+            set lastErr to e
+          end try
+        end repeat
+      end repeat
+    end if
+    return "ERR no status menu item — " & lastErr
+  end tell
 end tell
 '''
     try:
         r = subprocess.run(["osascript", "-e", script],
-                           check=False, timeout=1.5,
+                           check=False, timeout=2.0,
                            capture_output=True, text=True)
         out = (r.stdout or r.stderr or "").strip()
         print(f"[viewer] wispr menu click: {out}", flush=True)
+        # Cache the winning coordinates for next time.
+        if out.startswith("OK ") and "mb=" in out and "item=" in out:
+            try:
+                parts = dict(p.split("=") for p in out.split() if "=" in p)
+                _WISPR_MENU_HINT = (int(parts["mb"]), int(parts["item"]))
+            except Exception:
+                pass
+        return out
     except Exception as e:
-        print(f"[viewer] wispr menu click failed: {e}", flush=True)
+        msg = f"ERR exception: {e}"
+        print(f"[viewer] wispr menu click failed: {msg}", flush=True)
+        return msg
+
+
+def _probe_wispr_menu() -> str:
+    """Return a human-readable description of Wispr Flow's menu bars,
+    item counts, titles, and descriptions — for debugging."""
+    script = '''
+tell application "System Events"
+  if not (exists (process "Wispr Flow")) then
+    return "Wispr Flow not running"
+  end if
+  tell process "Wispr Flow"
+    set out to ""
+    set mbCount to count of menu bars
+    set out to "menu bars: " & mbCount & linefeed
+    repeat with i from 1 to mbCount
+      try
+        set itemCount to count of menu bar items of menu bar i
+      on error
+        set itemCount to -1
+      end try
+      set out to out & "  mb " & i & " items: " & itemCount & linefeed
+      if itemCount > 0 then
+        repeat with j from 1 to itemCount
+          try
+            set itm to menu bar item j of menu bar i
+            set t to ""
+            set d to ""
+            try
+              set t to (title of itm as string)
+            end try
+            try
+              set d to (description of itm as string)
+            end try
+            set out to out & "    [" & i & "," & j & "] title=\\"" & t & "\\" desc=\\"" & d & "\\"" & linefeed
+          on error errm
+            set out to out & "    [" & i & "," & j & "] err=" & errm & linefeed
+          end try
+        end repeat
+      end if
+    end repeat
+    return out
+  end tell
+end tell
+'''
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           check=False, timeout=3.0,
+                           capture_output=True, text=True)
+        return (r.stdout or r.stderr or "").strip() or "(empty)"
+    except Exception as e:
+        return f"probe failed: {e}"
 
 
 def _triple_tap_cgevent(keycode: int, fn_flag: bool = False,
@@ -7395,6 +7571,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "click":
                 _click()
                 self._write_status(200, "application/json", b'{"ok":true}')
+                return
+            if action == "wispr_fire_menu":
+                # Fire the menu-bar click NOW so the user can verify the
+                # AppleScript actually toggles Wispr without doing the
+                # prayer gesture.
+                result = _tap_wispr_menu_click()
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "result": result}).encode(),
+                )
+                return
+            if action == "wispr_probe":
+                # Dump Wispr Flow's menu-bar layout for debugging.
+                result = _probe_wispr_menu()
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "result": result}).encode(),
+                )
                 return
             if action == "test_click":
                 # Manual primary-click for verifying the cursor lands right.
