@@ -1230,6 +1230,12 @@ HTML = """<!doctype html>
     border-radius:999px; border:1px solid #2a2a38; background:#15151c;
     color:var(--dim); }
   #vt-btn.on { background:#6ee7b7; color:#05170f; border-color:#6ee7b7; }
+  #jam-mute-btn { cursor:pointer; font-size:14px;
+    padding:6px 12px; border-radius:999px; border:1px solid #2a2a38;
+    background:#15151c; color:#b48cff; font-family: inherit; }
+  #jam-mute-btn.muted { background:#2a1a3a; color:#ffd1f3;
+    border-color:#b48cff; }
+  #jam-mute-btn:hover { border-color:#b48cff; }
   #box-btn { cursor:pointer; font-size:10px; letter-spacing:0.16em;
     text-transform:uppercase; font-weight:700; padding:6px 14px;
     border-radius:999px; border:1px solid #5a2222; background:#1a0808;
@@ -1418,6 +1424,9 @@ HTML = """<!doctype html>
     <button id="cc-btn"  type="button">control center</button>
     <button id="vt-btn"  type="button">voice test</button>
     <button id="jam-btn" type="button">jam mode</button>
+    <button id="jam-mute-btn" type="button"
+      title="Mute the jam-mode synth output without leaving jam mode."
+      style="display:none;">🔊</button>
     <button id="box-btn" type="button"
       title="Open 🥊 Muay Thai mode in a new tab — punch McGregor, take some hits, have fun."
       onclick="window.open('/boxing','_blank')">🥊 fight mode</button>
@@ -1489,6 +1498,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
         <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to paste (Cmd+V).">👍 paste</button>
+        <button class="cc-opt" data-exp="mouth_paste" title="Open your mouth briefly to paste (Cmd+V). Auto-skipped if mouth is also your click method.">👄 mouth paste</button>
         <button class="cc-opt" data-exp="fist_zoom" title="While the fist (grab) is held, push your hand toward the camera to zoom in, pull it back to zoom out. Side-to-side still pans.">🤛 fist depth zoom</button>
         <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
         <button class="cc-opt" id="cc-atelier-manual" title="Force atelier mode on/off without doing the pose">atelier: off</button>
@@ -2151,11 +2161,31 @@ HTML = """<!doctype html>
 
   // Jam Mode button: hides voice UI, disables swipe, routes hands to synths.
   const jamBtn = document.getElementById('jam-btn');
+  const jamMuteBtn = document.getElementById('jam-mute-btn');
+  let jamMuted = false;
+  let jamGain  = 0.9; // remember last user-chosen master volume
+  // Apply audio gating: ANY synth output is silenced unless jam mode is
+  // on AND not muted. Prevents stray pad/drum/theremin sound when the
+  // user is just on the regular control center.
+  function applyMasterGain() {
+    if (!masterGain) return;
+    const live = (jamMode && !jamMuted) ? jamGain : 0;
+    try { masterGain.gain.value = live; } catch (e) {}
+  }
+  function setJamMute(on) {
+    jamMuted = !!on;
+    jamMuteBtn.classList.toggle('muted', jamMuted);
+    jamMuteBtn.textContent = jamMuted ? '🔇' : '🔊';
+    applyMasterGain();
+  }
+  jamMuteBtn.addEventListener('click', () => setJamMute(!jamMuted));
+
   function setJamMode(on) {
     jamMode = on;
     document.body.classList.toggle('jam', on);
     jamBtn.classList.toggle('on', on);
     jamBtn.textContent = on ? 'jam mode · on' : 'jam mode';
+    jamMuteBtn.style.display = on ? 'inline-block' : 'none';
     if (on && voiceWanted) stopVoice();
     // Immediately silence whichever synth bank is now idle.
     if (on) {
@@ -2165,6 +2195,7 @@ HTML = """<!doctype html>
       if (jamBass) jamBass.setXY(null, null);
       if (jamLead) jamLead.setXY(null, null);
     }
+    applyMasterGain();
     fetch('/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2247,7 +2278,8 @@ HTML = """<!doctype html>
   if (djVol) {
     djVol.addEventListener('input', () => {
       const v = Number(djVol.value) / 100;
-      if (masterGain) masterGain.gain.value = v;
+      jamGain = v;
+      applyMasterGain();
     });
   }
 
@@ -3437,6 +3469,10 @@ HTML = """<!doctype html>
     jamBass = new JamBass(ctx, masterGain);
     jamLead = new JamLead(ctx, masterGain);
     audioReady = true;
+    // Music is gated to jam mode. Until the user clicks "jam mode", all
+    // synth output is silenced — even if the page handlers call into
+    // pad/drums/theremins for face/hand events.
+    applyMasterGain();
     statusEl.textContent = 'audio ready';
     statusEl.className = 'status on';
   }
@@ -3605,6 +3641,10 @@ HTML = """<!doctype html>
       if ('okDrag' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="ok_drag"]');
         if (b) b.classList.toggle('on', !!msg.okDrag);
+      }
+      if ('mouthPaste' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="mouth_paste"]');
+        if (b) b.classList.toggle('on', !!msg.mouthPaste);
       }
       if ('atelierEnabled' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="atelier"]');
@@ -4101,6 +4141,14 @@ _thumbs_dclick_enabled: bool = True
 
 # Head bob UP (chin-lift) → Cmd+C copy.
 _head_copy_enabled: bool = True
+
+# Mouth-open paste — open jaw briefly to fire Cmd+V.
+# Off by default since "mouth" is also a click method; turning this on
+# while click_method == "mouth" would conflict.
+_mouth_paste_enabled: bool = False
+_mouth_paste_armed: bool = True
+_mouth_paste_last_at: float = 0.0
+MOUTH_PASTE_COOLDOWN_S: float = 0.7  # quiet period between pastes
 
 # 👌 OK-sign drag lock — alternative press-and-hold. Flash an OK-sign
 # (thumb-tip + index-tip touching, middle/ring/pinky extended outward)
@@ -6429,6 +6477,29 @@ def _update_ok_drag(hands_lm_list, now: float) -> Optional[str]:
     return "lock"
 
 
+def _detect_mouth_paste(blendshapes, now: float) -> bool:
+    """Edge-triggered mouth-open → fire Cmd+V. Mirrors the mouth-click
+    detector but uses its own armed flag and cooldown so a click and a
+    paste don't fight each other."""
+    global _mouth_paste_armed, _mouth_paste_last_at
+    if not blendshapes:
+        return False
+    jaw = 0.0
+    for b in blendshapes:
+        if b.category_name == "jawOpen":
+            jaw = float(b.score)
+            break
+    fired = False
+    if jaw > MOUTH_CLICK_THRESHOLD and _mouth_paste_armed:
+        if now - _mouth_paste_last_at > MOUTH_PASTE_COOLDOWN_S:
+            _mouth_paste_last_at = now
+            _mouth_paste_armed = False
+            fired = True
+    elif jaw < MOUTH_CLICK_OPEN_THR:
+        _mouth_paste_armed = True
+    return fired
+
+
 def _ok_drag_force_release() -> None:
     """Release any 👌-locked mouse on master-off / disable."""
     global _ok_drag_locked, _ok_drag_armed
@@ -6701,6 +6772,19 @@ def _capture_loop() -> None:
                 _toast("handsfree", "copied ✂︎")
             except Exception as e:
                 print(f"[viewer] head-up copy failed: {e}", flush=True)
+        # Mouth-open paste — fires Cmd+V on each open-jaw edge.
+        # Skipped when mouth is also the click method or mouth-hold is on,
+        # to avoid double-actions on a single jaw-open.
+        if (_mouth_paste_enabled and _system_enabled
+                and _click_method != "mouth"
+                and not _mouth_hold_enabled
+                and _detect_mouth_paste(face_blendshapes, now)):
+            print("[viewer] 👄 mouth-open → cmd+v", flush=True)
+            try:
+                _fire_hotkey("cmd+v")
+                _toast("handsfree", "pasted 📋")
+            except Exception as e:
+                print(f"[viewer] mouth-paste failed: {e}", flush=True)
         blinked = _detect_blink(face_blendshapes, now)
         prayer_change = _update_dict_gesture(hands_lm_list, now)
         booted, clap_tick = _update_double_clap(hands_lm_list, now)
@@ -7632,6 +7716,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "fistZoom": _fist_zoom_enabled}).encode(),
                 )
                 return
+            if action == "mouth_paste":
+                global _mouth_paste_enabled, _mouth_paste_armed
+                _mouth_paste_enabled = bool(data.get("on"))
+                _mouth_paste_armed = True
+                print(f"[viewer] mouth-paste = {_mouth_paste_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "mouthPaste": _mouth_paste_enabled}).encode(),
+                )
+                return
             if action == "ok_drag":
                 global _ok_drag_enabled
                 _ok_drag_enabled = bool(data.get("on"))
@@ -7935,6 +8030,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "headCopy": _head_copy_enabled,
                         "fistZoom": _fist_zoom_enabled,
                         "okDrag": _ok_drag_enabled,
+                        "mouthPaste": _mouth_paste_enabled,
                         "atelierEnabled": _atelier_enabled,
                         "atelierMode": _atelier_mode,
                         "releaseExtraTap": _wispr_release_extra_tap,
