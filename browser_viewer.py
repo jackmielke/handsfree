@@ -188,6 +188,174 @@ def _v2_handle_final(text: str) -> None:
         _v2_push_final(text)
 
 
+def _open_mic_sounddevice(samplerate: int = 16000, dtype: str = "float32",
+                          blocksize: int = 4000):
+    """Open the first input device that actually opens cleanly.
+    Returns (stream, dev_idx, dev_name). Each open attempt is wrapped in
+    a worker-thread + timeout so a hung device doesn't lock the engine.
+
+    Prefers the built-in MacBook mic (always works) over AirPods (often
+    -9986 when another app holds them)."""
+    import sounddevice as sd
+    devices = sd.query_devices()
+    # Build candidates: built-in / MacBook first, then everything else.
+    candidates: list = []
+    for i, d in enumerate(devices):
+        if d.get("max_input_channels", 0) <= 0:
+            continue
+        nm = d.get("name", "").lower()
+        if "macbook" in nm or "built-in" in nm:
+            candidates.insert(0, i)
+        else:
+            candidates.append(i)
+
+    def try_open(dev: int, sr: int):
+        result: dict = {}
+        def _go():
+            try:
+                if dtype == "int16":
+                    s = sd.RawInputStream(samplerate=sr, blocksize=blocksize,
+                                          dtype="int16", channels=1,
+                                          device=dev)
+                else:
+                    s = sd.InputStream(samplerate=sr, blocksize=blocksize,
+                                       dtype=dtype, channels=1, device=dev)
+                s.start()
+                result["stream"] = s
+            except Exception as e:
+                result["err"] = e
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(timeout=2.5)
+        if t.is_alive():
+            result["err"] = "open timed out (2.5s) — device hung"
+        return result
+
+    last_err = "no input devices found"
+    for dev in candidates:
+        nm = devices[dev].get("name", "?")
+        for sr in (samplerate, int(devices[dev].get("default_samplerate") or 0)):
+            if sr <= 0:
+                continue
+            r = try_open(dev, sr)
+            if "stream" in r:
+                actual_sr = sr
+                print(f"[v2 mic] opened device {dev} '{nm}' @ {actual_sr}Hz",
+                      flush=True)
+                # Note: if sr != samplerate, caller must resample.
+                r["stream"]._handsfree_actual_sr = actual_sr
+                return r["stream"], dev, nm
+            last_err = f"device {dev} '{nm}' @ {sr}Hz: {r.get('err')}"
+            print(f"[v2 mic] skip {nm} @ {sr}Hz ({r.get('err')})", flush=True)
+    raise RuntimeError(f"all input devices failed; last: {last_err}")
+
+
+def _avf_mic_open(target_sr: int = 16000):
+    """Open the system mic via AVAudioEngine. Returns (engine, queue,
+    stop_fn, native_sr). The tap pushes numpy float32 mono arrays at the
+    NATIVE sample rate into the queue.
+
+    AVAudioEngine taps share the input device gracefully on macOS, so
+    voice2 engines can run alongside Wispr Flow / Zoom etc without the
+    PortAudio -9986 conflict that sounddevice produces.
+    """
+    import AVFoundation
+    import numpy as np
+    import ctypes as _ct
+    import queue as _queue
+
+    audio_engine = AVFoundation.AVAudioEngine.alloc().init()
+    input_node = audio_engine.inputNode()
+    in_fmt = input_node.outputFormatForBus_(0)
+    native_sr = int(in_fmt.sampleRate())
+    native_channels = max(1, int(in_fmt.channelCount()))
+    print(f"[v2 avf] mic native: {native_sr}Hz {native_channels}ch",
+          flush=True)
+
+    q: _queue.Queue = _queue.Queue(maxsize=256)
+    tap_count = {"n": 0, "err": 0}
+
+    def tap(buffer, when):
+        try:
+            n = int(buffer.frameLength())
+            if n <= 0:
+                return
+            ch_ptr = buffer.floatChannelData()
+            if ch_ptr is None:
+                return
+            # Each channel is a pointer to n contiguous c_float samples.
+            # PyObjC exposes the array of pointers; we treat ch_ptr[0] as
+            # an int address and use ctypes to read raw memory into numpy.
+            try:
+                addr0 = int(ch_ptr[0])
+            except Exception:
+                # Fallback: pyobjc may give us a buffer-protocol object.
+                buf = bytes(ch_ptr[0])[: n * 4]
+                arr = np.frombuffer(buf, dtype=np.float32, count=n).copy()
+            else:
+                arr_t = (_ct.c_float * n).from_address(addr0)
+                arr = np.frombuffer(arr_t, dtype=np.float32, count=n).copy()
+            if native_channels >= 2:
+                try:
+                    addr1 = int(ch_ptr[1])
+                    arr_t1 = (_ct.c_float * n).from_address(addr1)
+                    arr2 = np.frombuffer(arr_t1, dtype=np.float32, count=n)
+                    arr = (arr + arr2) * 0.5
+                except Exception:
+                    pass
+            tap_count["n"] += 1
+            try:
+                q.put_nowait(arr)
+            except Exception:
+                pass
+        except Exception as e:
+            tap_count["err"] += 1
+            if tap_count["err"] <= 3:
+                print(f"[v2 avf-tap] err: {e}", flush=True)
+
+    input_node.installTapOnBus_bufferSize_format_block_(
+        0, 1024, in_fmt, tap,
+    )
+    audio_engine.prepare()
+    ok, err = audio_engine.startAndReturnError_(None)
+    if not ok:
+        try: input_node.removeTapOnBus_(0)
+        except Exception: pass
+        raise RuntimeError(f"AVAudioEngine start failed: {err}")
+
+    print("[v2 avf] engine started", flush=True)
+
+    def stop_fn():
+        try:
+            audio_engine.stop()
+            input_node.removeTapOnBus_(0)
+            print(f"[v2 avf] stopped (taps={tap_count['n']} "
+                  f"errs={tap_count['err']})", flush=True)
+        except Exception:
+            pass
+
+    return audio_engine, q, stop_fn, native_sr
+
+
+def _resample_to_16k(audio: "np.ndarray", native_sr: int) -> "np.ndarray":
+    """Cheap polyphase-style decimation from native_sr → 16000.
+    Uses linear interpolation for non-integer ratios (good enough for
+    16k-band speech recognition)."""
+    import numpy as np
+    if native_sr == 16000 or audio.size == 0:
+        return audio
+    ratio = native_sr / 16000.0
+    out_len = int(audio.size / ratio)
+    if out_len <= 0:
+        return np.zeros(0, dtype=np.float32)
+    # Sample at fractional positions in the source.
+    idx = np.arange(out_len) * ratio
+    i0 = idx.astype(np.int32)
+    i1 = np.minimum(i0 + 1, audio.size - 1)
+    frac = (idx - i0).astype(np.float32)
+    return (audio[i0] * (1.0 - frac) + audio[i1] * frac).astype(np.float32)
+
+
 def _v2_loop_apple() -> None:
     """Apple Speech framework engine. Streams partials + finals via the
     on-device recognizer; biased toward dictionary phrases via
@@ -334,11 +502,12 @@ def _v2_vosk_model_path() -> Optional[Path]:
 
 def _v2_loop_vosk() -> None:
     global _v2_partial, _v2_status, _v2_err
+    _v2_status = "loading vosk"
     try:
         import vosk
-        import sounddevice as sd
+        import numpy as np
     except Exception as e:
-        _v2_err = f"vosk/sounddevice import failed: {e}"
+        _v2_err = f"vosk import failed: {e}"
         _v2_status = "err"
         return
     model_path = _v2_vosk_model_path()
@@ -350,14 +519,14 @@ def _v2_loop_vosk() -> None:
         return
     SR = 16000
     BLOCK_N = 4000
+    _v2_status = "loading model"
     try:
         model = vosk.Model(str(model_path))
     except Exception as e:
         _v2_err = f"vosk model load failed: {e}"
         _v2_status = "err"
         return
-    # Lock the recognizer to the dictionary as a JSON grammar — Vosk
-    # will only emit phrases composed of these tokens.
+    _v2_status = "opening mic"
     grammar_words = []
     for phrase in _v2_dict:
         for w in phrase.split():
@@ -367,16 +536,15 @@ def _v2_loop_vosk() -> None:
     rec = vosk.KaldiRecognizer(model, SR, json.dumps(grammar_words))
     rec.SetWords(False)
     try:
-        stream = sd.RawInputStream(
-            samplerate=SR, blocksize=BLOCK_N, dtype="int16", channels=1,
+        stream, dev_idx, dev_name = _open_mic_sounddevice(
+            SR, dtype="int16", blocksize=BLOCK_N,
         )
-        stream.start()
     except Exception as e:
         _v2_err = f"mic open failed: {e}"
         _v2_status = "err"
         return
     _v2_status = "listening"
-    print("[v2 vosk] listening (grammar-locked)…", flush=True)
+    print(f"[v2 vosk] listening on '{dev_name}' (grammar-locked)", flush=True)
     try:
         while not _v2_stop.is_set():
             try:
@@ -405,10 +573,8 @@ def _v2_loop_vosk() -> None:
                 except Exception:
                     pass
     finally:
-        try:
-            stream.stop(); stream.close()
-        except Exception:
-            pass
+        try: stream.stop(); stream.close()
+        except Exception: pass
     _v2_status = "off"
     _v2_partial = ""
     print("[v2 vosk] stopped", flush=True)
@@ -416,21 +582,16 @@ def _v2_loop_vosk() -> None:
 
 def _v2_loop_whisper() -> None:
     """Whisper engine — VAD-segments mic input then transcribes with the
-    already-loaded faster-whisper tiny.en model. Higher quality than the
-    small Vosk model (Vosk small struggles below 90% on natural speech;
-    whisper-tiny.en hits ~95+ for short commands), at the cost of ~200ms
-    latency per utterance instead of streaming partials.
-
-    Auto-pauses while Wispr/dictation prayer is active so they don't
-    transcribe the same words.
+    already-loaded faster-whisper tiny.en model. Auto-pauses while
+    prayer-hands Wispr is active so they don't double-transcribe.
     """
     global _v2_partial, _v2_status, _v2_err
+    _v2_status = "loading whisper"
     try:
-        import sounddevice as sd
         import numpy as np
         from collections import deque
     except Exception as e:
-        _v2_err = f"sounddevice/numpy import failed: {e}"
+        _v2_err = f"numpy import failed: {e}"
         _v2_status = "err"
         return
     SR = 16000
@@ -441,25 +602,24 @@ def _v2_loop_whisper() -> None:
     PRE_ROLL_S = 0.25
     MIN_SEGMENT_S = 0.35
     MAX_SEGMENT_S = 6.0
-    try:
-        stream = sd.InputStream(
-            samplerate=SR, channels=1, dtype="float32", blocksize=BLOCK_N,
-        )
-        stream.start()
-    except Exception as e:
-        _v2_err = f"mic open failed: {e}"
-        _v2_status = "err"
-        return
+    _v2_status = "loading model"
     try:
         _get_whisper()
     except Exception as e:
         _v2_err = f"whisper model load failed: {e}"
         _v2_status = "err"
-        try: stream.stop(); stream.close()
-        except Exception: pass
+        return
+    _v2_status = "opening mic"
+    try:
+        stream, dev_idx, dev_name = _open_mic_sounddevice(
+            SR, dtype="float32", blocksize=BLOCK_N,
+        )
+    except Exception as e:
+        _v2_err = f"mic open failed: {e}"
+        _v2_status = "err"
         return
     _v2_status = "listening"
-    print("[v2 whisper] listening (VAD-segmented, tiny.en)…", flush=True)
+    print(f"[v2 whisper] listening on '{dev_name}' (tiny.en VAD)", flush=True)
     pre_roll: Deque = deque(maxlen=int(PRE_ROLL_S / BLOCK_S))
     buf: list = []
     in_speech = False
@@ -472,7 +632,6 @@ def _v2_loop_whisper() -> None:
             print(f"[v2 whisper] read err: {e}", flush=True)
             time.sleep(0.05)
             continue
-        # Auto-pause while Wispr/dictation is recording.
         if _v2_pause_during_wispr and _prayer_active:
             buf = []; in_speech = False; silence_s = 0.0
             pre_roll.clear()
@@ -491,8 +650,8 @@ def _v2_loop_whisper() -> None:
             silence_s = 0.0
             if segment_s >= MAX_SEGMENT_S:
                 _flush_whisper_segment(buf, SR)
-                buf = []; in_speech = False; silence_s = 0.0
-                segment_s = 0.0
+                buf = []; in_speech = False
+                silence_s = 0.0; segment_s = 0.0
         else:
             pre_roll.append(data.copy())
             if in_speech:
@@ -502,17 +661,42 @@ def _v2_loop_whisper() -> None:
                 if (silence_s >= SILENCE_HANG_S
                         and segment_s >= MIN_SEGMENT_S):
                     _flush_whisper_segment(buf, SR)
-                    buf = []; in_speech = False; silence_s = 0.0
-                    segment_s = 0.0
+                    buf = []; in_speech = False
+                    silence_s = 0.0; segment_s = 0.0
             else:
                 _v2_partial = ""
-    try:
-        stream.stop(); stream.close()
-    except Exception:
-        pass
+    try: stream.stop(); stream.close()
+    except Exception: pass
     _v2_status = "off"
     _v2_partial = ""
     print("[v2 whisper] stopped", flush=True)
+
+
+def _flush_whisper_segment(blocks: list, sr: int) -> None:
+    """Concatenate VAD-buffered audio blocks and run whisper on them."""
+    global _v2_partial
+    try:
+        import numpy as np
+    except Exception:
+        return
+    try:
+        audio = np.concatenate(blocks).flatten().astype("float32")
+        if audio.shape[0] == 0:
+            return
+        _v2_partial = "🤔 transcribing…"
+        wm = _get_whisper()
+        prompt = ", ".join(_v2_dict.keys())
+        segments, _info = wm.transcribe(
+            audio, language="en", beam_size=1, vad_filter=False,
+            condition_on_previous_text=False, initial_prompt=prompt,
+        )
+        text = " ".join(s.text.strip() for s in segments).strip()
+        _v2_partial = ""
+        if text:
+            _v2_handle_final(text)
+    except Exception as e:
+        print(f"[v2 whisper] transcribe failed: {e}", flush=True)
+        _v2_partial = ""
 
 
 def _flush_whisper_segment(blocks: list, sr: int) -> None:
@@ -2392,6 +2576,7 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
+        <button class="cc-opt" data-exp="mouth_hold" title="Open your mouth and hold it open to press-and-hold the mouse button. Close mouth to release. Works alongside any click method except 'mouth open'.">😮 mouth press-and-hold</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
         <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
@@ -5202,7 +5387,7 @@ T_GESTURE_COOLDOWN_S: float = 1.2
 
 # Mouth-hold: when mouth click is primary, mouth-open = mouseDown,
 # mouth-close = mouseUp (press-and-hold instead of discrete click).
-_mouth_hold_enabled: bool = False
+_mouth_hold_enabled: bool = True   # default ON: mouth-open holds mouseDown
 _mouth_hold_down: bool = False
 
 # Peace sign ✌️ → press-and-hold the mouse (hold-to-drag).
