@@ -27,18 +27,27 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# If a daemon is already running, just open the UI. Otherwise launch.
+# If a daemon is already serving the port, open the UI in the browser
+# and exit cleanly. Otherwise EXEC python so the bash shell is replaced
+# — that way `launchctl kickstart -k` (which kills the LaunchAgent's
+# top-level process) terminates the python daemon too. macOS still
+# attributes TCC permissions to this bundle because the executable that
+# was launched belongs to Wonder.app.
 if curl -s -o /dev/null -m 0.5 http://localhost:8765/; then
   open http://localhost:8765/
-else
-  "$VENV_PY" "$SCRIPT" &
-  # Give the server a moment to come up before opening the UI.
+  exit 0
+fi
+
+# Open the UI shortly after the server comes up. We do this BEFORE
+# exec'ing python so the open-browser step has a chance to fire.
+(
   for i in 1 2 3 4 5 6 7 8 9 10; do
     if curl -s -o /dev/null -m 0.5 http://localhost:8765/; then
-      break
+      open http://localhost:8765/
+      exit 0
     fi
     sleep 0.5
   done
-  open http://localhost:8765/
-  wait
-fi
+) &
+
+exec "$VENV_PY" "$SCRIPT"
