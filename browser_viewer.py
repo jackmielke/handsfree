@@ -432,6 +432,301 @@ WISPR_USE_FN_FLAG = os.environ.get("HANDSFREE_WISPR_FN_FLAG", "0") == "1"
 HAND_PLAY_THRESHOLD_Y = 0.55
 
 
+VISION_HTML = r"""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>handsfree — 🔬 vision lab</title>
+<style>
+  :root { color-scheme: dark;
+    --bg:#0a0a10; --panel:#13131a; --ink:#ececf1; --dim:#7a7a88;
+    --accent:#6ee7b7; --warm:#fbbf24; --hot:#ff8a8a; --cool:#70b4ec; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; min-height:100%; background:var(--bg);
+    color:var(--ink); font-family: ui-monospace, Menlo, monospace; }
+  .wrap { max-width:1300px; margin:0 auto; padding:24px;
+    display:grid; grid-template-columns: 1fr 320px; gap:18px; }
+  h1 { font-size:13px; letter-spacing:0.18em; text-transform:uppercase;
+    color:var(--dim); font-weight:500; margin:0 0 6px; }
+  h2 { font-size:11px; letter-spacing:0.2em; text-transform:uppercase;
+    color:var(--warm); font-weight:700; margin:18px 0 8px; }
+  .head { grid-column:1/-1; display:flex; align-items:baseline;
+    justify-content:space-between; padding-bottom:10px;
+    border-bottom:1px dashed #2a2a35; margin-bottom:6px; }
+  .head h1 { color: var(--accent); font-size: 16px; letter-spacing:0.16em; }
+  .head .links { font-size:11px; color:var(--dim); }
+  .head .links a { color:var(--cool); text-decoration:none;
+    margin-left:14px; border-bottom:1px dotted #2a3a55; padding-bottom:1px; }
+  .head .links a:hover { color:var(--accent); border-color:var(--accent); }
+
+  .panel { background:var(--panel); border-radius:12px; padding:14px 16px;
+    border:1px solid #1d1d27; }
+
+  /* Blendshape bars */
+  .bs-grid { display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap:6px 16px; }
+  .bs { display:grid; grid-template-columns: 130px 1fr 38px;
+    align-items:center; gap:8px; font-size:11px; }
+  .bs .nm { color:var(--ink); white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; }
+  .bs .bar { height:8px; background:#0a0a14; border-radius:4px;
+    overflow:hidden; position:relative; border:1px solid #1c1c25; }
+  .bs .fill { position:absolute; top:0; bottom:0; left:0;
+    background:linear-gradient(90deg, var(--cool), var(--accent));
+    border-radius:4px;
+    transition: width 80ms linear; }
+  .bs.hot .fill { background:linear-gradient(90deg, var(--warm), var(--hot)); }
+  .bs .v { color:var(--dim); text-align:right;
+    font-variant-numeric: tabular-nums; }
+  .bs .v.on { color:var(--accent); }
+
+  /* Hand cards */
+  .hand { background:#0d0d14; border-radius:10px; padding:10px 12px;
+    border:1px solid #1c1c25; margin-bottom:8px; }
+  .hand .pose { font-size:18px; color:var(--ink); margin-bottom:6px; }
+  .hand .meta { font-size:11px; color:var(--dim); margin-bottom:6px; }
+  .fingers { display:grid; grid-template-columns: repeat(4, 1fr);
+    gap:4px; font-size:10px; }
+  .fgr { padding:4px 6px; border-radius:6px;
+    background:#0a0a14; border:1px solid #20202a; text-align:center;
+    color:var(--dim); }
+  .fgr.on { background:#0d2a1f; border-color:var(--accent);
+    color:var(--accent); }
+
+  /* Gesture chips */
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { padding:4px 10px; border-radius:999px;
+    background:#0d0d14; border:1px solid #20202a;
+    font-size:11px; color:var(--dim); }
+  .chip.on { background:#0d2a1f; border-color:var(--accent);
+    color:var(--accent); font-weight:700; }
+
+  /* Head pose pad */
+  .hpad { width:100%; height:160px; background:#0a0a14;
+    border:1px solid #1c1c25; border-radius:10px;
+    position:relative; overflow:hidden; }
+  .hpad::before, .hpad::after { content:""; position:absolute;
+    background:#1c1c25; }
+  .hpad::before { left:50%; top:0; bottom:0; width:1px; }
+  .hpad::after  { top:50%; left:0; right:0; height:1px; }
+  .hpad .dot { position:absolute; width:14px; height:14px; border-radius:50%;
+    background:var(--accent); transform:translate(-50%,-50%);
+    box-shadow: 0 0 14px rgba(110,231,183,0.8);
+    transition: left 80ms linear, top 80ms linear; }
+  .hpad .lbl { position:absolute; left:8px; top:6px;
+    font-size:10px; color:var(--dim); }
+
+  /* Activity feed */
+  .feed { font-size:11px; max-height:320px; overflow:auto;
+    border-top:1px dashed #2a2a35; padding-top:6px; }
+  .feed-row { display:flex; justify-content:space-between;
+    padding:3px 0; border-bottom:1px dotted #1c1c25; }
+  .feed-row .lbl { color:var(--ink); }
+  .feed-row .ago { color:var(--dim); font-variant-numeric: tabular-nums; }
+
+  /* Camera mini */
+  .cam { width:100%; aspect-ratio:16/10; object-fit:cover;
+    border-radius:10px; background:#000; border:1px solid #1c1c25; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>🔬 vision lab</h1>
+    <div class="links">
+      what the system sees, live ·
+      <a href="/">← back to control center</a>
+      <a href="/boxing">🥊 fight</a>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>🎭 face blendshapes</h2>
+      <div class="bs-grid" id="bs"></div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h2>✋ hands</h2>
+      <div id="hands">(no hands detected)</div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h2>⚡ named gestures (live)</h2>
+      <div class="chips" id="gestures"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>🎥 camera</h2>
+      <img class="cam" src="/stream" alt="cam">
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h2>🙆 head pose</h2>
+      <div class="hpad" id="hpad">
+        <div class="lbl" id="hpad-lbl">yaw — pitch —</div>
+        <div class="dot" id="hpad-dot" style="left:50%; top:50%;"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h2>📋 recent events</h2>
+      <div class="feed" id="feed">(no events yet)</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const HOT_KEYS = new Set([
+    "jawOpen", "mouthSmileLeft", "mouthSmileRight",
+    "browInnerUp", "eyeBlinkLeft", "eyeBlinkRight",
+    "tongueOut",
+  ]);
+  const bsEl = document.getElementById('bs');
+  const handsEl = document.getElementById('hands');
+  const gesturesEl = document.getElementById('gestures');
+  const hpadDot = document.getElementById('hpad-dot');
+  const hpadLbl = document.getElementById('hpad-lbl');
+  const feedEl = document.getElementById('feed');
+
+  const ALL_GESTURES = [
+    ['peace', '✌️ peace'],
+    ['fist',  '✊ fist'],
+    ['thumbs','👍 thumbs'],
+    ['ok',    '👌 OK'],
+    ['prayer','🙏 prayer'],
+    ['atelierMode','✨ atelier'],
+  ];
+  // Initial gesture chips
+  ALL_GESTURES.forEach(([k, lbl]) => {
+    const c = document.createElement('div');
+    c.className = 'chip'; c.id = 'g-' + k; c.textContent = lbl;
+    gesturesEl.appendChild(c);
+  });
+
+  // Initial blendshape rows (alphabetical-ish from server order)
+  const BS_ORDER = [
+    "browInnerUp","browDownLeft","browDownRight",
+    "browOuterUpLeft","browOuterUpRight",
+    "eyeBlinkLeft","eyeBlinkRight",
+    "eyeWideLeft","eyeWideRight",
+    "eyeSquintLeft","eyeSquintRight",
+    "cheekPuff","noseSneerLeft","noseSneerRight",
+    "jawOpen","jawLeft","jawRight",
+    "mouthSmileLeft","mouthSmileRight",
+    "mouthFrownLeft","mouthFrownRight",
+    "mouthPucker","mouthFunnel",
+    "mouthRollLower","mouthRollUpper",
+    "mouthShrugLower","mouthShrugUpper",
+    "tongueOut",
+  ];
+  const bsRows = {};
+  BS_ORDER.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'bs' + (HOT_KEYS.has(name) ? ' hot' : '');
+    row.innerHTML =
+      `<div class="nm">${name}</div>
+       <div class="bar"><div class="fill" style="width:0"></div></div>
+       <div class="v">0.00</div>`;
+    bsEl.appendChild(row);
+    bsRows[name] = row;
+  });
+
+  function paintBlendshapes(bs) {
+    BS_ORDER.forEach(name => {
+      const row = bsRows[name];
+      const v = (bs && bs[name] != null) ? bs[name] : 0;
+      const fill = row.querySelector('.fill');
+      const out  = row.querySelector('.v');
+      fill.style.width = (v * 100).toFixed(0) + '%';
+      out.textContent = v.toFixed(2);
+      out.classList.toggle('on', v > 0.4);
+    });
+  }
+
+  function paintHands(hands) {
+    if (!hands || !hands.length) {
+      handsEl.innerHTML = '<div style="color:var(--dim);font-size:11px;">' +
+        '(no hands detected)</div>';
+      return;
+    }
+    let html = '';
+    hands.forEach((h, i) => {
+      const f = h.fingers || {};
+      html += `<div class="hand">
+        <div class="pose">${h.pose || '—'}</div>
+        <div class="meta">scale ${(h.scale||0).toFixed(3)}
+          · wrist (${(h.wristX||0).toFixed(2)}, ${(h.wristY||0).toFixed(2)})</div>
+        <div class="fingers">
+          ${['index','middle','ring','pinky'].map(k =>
+            `<div class="fgr${f[k] ? ' on':''}">${k}${f[k]?' ✓':''}</div>`
+          ).join('')}
+        </div>
+      </div>`;
+    });
+    handsEl.innerHTML = html;
+  }
+
+  function paintGestures(g) {
+    ALL_GESTURES.forEach(([k]) => {
+      const c = document.getElementById('g-' + k);
+      if (c) c.classList.toggle('on', !!(g && g[k]));
+    });
+  }
+
+  function paintHead(yaw, pitch) {
+    if (yaw == null || pitch == null) {
+      hpadLbl.textContent = 'yaw — pitch —';
+      hpadDot.style.left = '50%';
+      hpadDot.style.top  = '50%';
+      hpadDot.style.opacity = 0.3;
+      return;
+    }
+    hpadDot.style.opacity = 1;
+    // Yaw range roughly ±0.6, pitch roughly ±0.6 for head turns/nods
+    const x = 50 + Math.max(-1, Math.min(1, yaw / 0.6)) * 45;
+    const y = 50 + Math.max(-1, Math.min(1, pitch / 0.6)) * 45;
+    hpadDot.style.left = x + '%';
+    hpadDot.style.top  = y + '%';
+    hpadLbl.textContent = `yaw ${yaw.toFixed(2)} pitch ${pitch.toFixed(2)}`;
+  }
+
+  function paintFeed(events) {
+    if (!events || !events.length) {
+      feedEl.innerHTML = '<div style="color:var(--dim);">(no events yet)</div>';
+      return;
+    }
+    const now = Date.now() / 1000;
+    feedEl.innerHTML = events.map(e => {
+      const ago = Math.max(0, now - e.t);
+      const agoStr = ago < 1 ? 'just now'
+                   : ago < 60 ? ago.toFixed(1) + 's ago'
+                              : Math.floor(ago/60) + 'm ago';
+      return `<div class="feed-row"><span class="lbl">${e.label}</span>` +
+             `<span class="ago">${agoStr}</span></div>`;
+    }).join('');
+  }
+
+  function connect() {
+    const es = new EventSource('/vision-stream');
+    es.onmessage = (m) => {
+      let d; try { d = JSON.parse(m.data); } catch (e) { return; }
+      paintBlendshapes(d.blendshapes);
+      paintHands(d.hands);
+      paintGestures(d.gestures);
+      paintHead(d.headYaw, d.headPitch);
+      paintFeed(d.events);
+    };
+    es.onerror = () => { es.close(); setTimeout(connect, 1500); };
+  }
+  connect();
+</script>
+</body></html>
+"""
+
+
 BOXING_HTML = r"""<!doctype html>
 <html><head>
 <meta charset="utf-8">
@@ -1427,6 +1722,13 @@ HTML = """<!doctype html>
     <button id="jam-mute-btn" type="button"
       title="Mute the jam-mode synth output without leaving jam mode."
       style="display:none;">🔊</button>
+    <button id="lab-btn" type="button"
+      title="Open the 🔬 vision lab in a new tab — see every face blendshape, hand pose, and gesture truth value live. Useful for designing new actions."
+      onclick="window.open('/vision','_blank')"
+      style="cursor:pointer; font-size:10px; letter-spacing:0.16em;
+        text-transform:uppercase; font-weight:700; padding:6px 14px;
+        border-radius:999px; border:1px solid #2a3a55; background:#0d1420;
+        color:#70b4ec; font-family:inherit;">🔬 vision lab</button>
     <button id="box-btn" type="button"
       title="Open 🥊 Muay Thai mode in a new tab — punch McGregor, take some hits, have fun."
       onclick="window.open('/boxing','_blank')">🥊 fight mode</button>
@@ -4127,6 +4429,14 @@ _left_hand_x: Optional[float] = None
 _right_hand_x: Optional[float] = None
 _jam_mode: bool = False
 
+# 🔬 Vision-lab snapshot — last face/hand state for the /vision page.
+# Stored as a plain dict so the SSE thread can copy it cheaply under the
+# state lock without re-walking MediaPipe results.
+_vision_snapshot: dict = {}
+# Rolling list of recent gesture/event timestamps for the activity feed.
+_vision_events: list = []   # newest first; capped at 24
+VISION_EVENT_CAP: int = 24
+
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
 _pointing_method: str = "finger"  # "head" | "finger" | "gaze"
 _click_method: str = "mouth"      # primary (left) click gesture
@@ -6653,6 +6963,121 @@ def _update_ok_drag(hands_lm_list, now: float) -> Optional[str]:
     return "lock"
 
 
+# Subset of MediaPipe face blendshapes we surface to the vision lab.
+# Out of the 52, these are the ones with intuitive meaning. The lab
+# shows them as live bars so Jack can see exactly what the model
+# perceives.
+_VISION_BLEND_KEYS = (
+    "browInnerUp", "browDownLeft", "browDownRight",
+    "browOuterUpLeft", "browOuterUpRight",
+    "eyeBlinkLeft", "eyeBlinkRight",
+    "eyeWideLeft", "eyeWideRight",
+    "eyeSquintLeft", "eyeSquintRight",
+    "cheekPuff",
+    "noseSneerLeft", "noseSneerRight",
+    "jawOpen", "jawLeft", "jawRight",
+    "mouthSmileLeft", "mouthSmileRight",
+    "mouthFrownLeft", "mouthFrownRight",
+    "mouthPucker", "mouthFunnel", "mouthRollLower", "mouthRollUpper",
+    "mouthShrugLower", "mouthShrugUpper",
+    "tongueOut",
+)
+
+
+def _push_vision_event(label: str) -> None:
+    """Add an event to the rolling vision feed. Called from the capture
+    loop whenever a named gesture fires."""
+    global _vision_events
+    _vision_events.insert(0, {"t": time.time(), "label": label})
+    if len(_vision_events) > VISION_EVENT_CAP:
+        _vision_events = _vision_events[:VISION_EVENT_CAP]
+
+
+def _hand_pose_label(hand) -> str:
+    """Best-effort name for the current single-hand pose. Returns a
+    short emoji+label string for the vision lab."""
+    if _is_fist(hand):
+        return "✊ fist"
+    if _is_peace_sign(hand):
+        return "✌️ peace"
+    if _is_thumbs_up(hand):
+        return "👍 thumbs"
+    if _is_ok_sign(hand):
+        return "👌 OK"
+    # Open palm: any-three-fingers extended
+    extended = sum(_finger_extended(hand, t, p) for (t, p) in
+                   ((8, 6), (12, 10), (16, 14), (20, 18)))
+    if extended >= 4:
+        return "🖐 open palm"
+    if extended >= 2:
+        return f"🤚 {extended} fingers"
+    return "—"
+
+
+def _hand_finger_state(hand) -> dict:
+    """Return per-finger extended/curled state for the lab UI."""
+    return {
+        "index":  _finger_extended(hand, 8, 6),
+        "middle": _finger_extended(hand, 12, 10),
+        "ring":   _finger_extended(hand, 16, 14),
+        "pinky":  _finger_extended(hand, 20, 18),
+    }
+
+
+def _yaw_pitch_or_none(face_matrix):
+    if face_matrix is None:
+        return None, None
+    try:
+        y, p = _matrix_to_yaw_pitch(face_matrix)
+        return float(y), float(p)
+    except Exception:
+        return None, None
+
+
+def _build_vision_snapshot(face_blendshapes, face_matrix, hands_lm_list,
+                           now: float) -> dict:
+    snap: dict = {"t": now}
+    # ---- Face blendshapes ----
+    blends: dict = {}
+    if face_blendshapes:
+        for b in face_blendshapes:
+            n = b.category_name
+            if n in _VISION_BLEND_KEYS:
+                blends[n] = round(float(b.score), 3)
+    snap["blendshapes"] = blends
+    # ---- Head pose ----
+    yaw, pitch = _yaw_pitch_or_none(face_matrix)
+    snap["headYaw"]   = None if yaw is None else round(yaw, 3)
+    snap["headPitch"] = None if pitch is None else round(pitch, 3)
+    # ---- Hands ----
+    hands_out = []
+    for h in hands_lm_list or []:
+        try:
+            hands_out.append({
+                "pose": _hand_pose_label(h),
+                "scale": round(_hand_scale(h), 3),
+                "wristX": round(float(h[0].x), 3),
+                "wristY": round(float(h[0].y), 3),
+                "fingers": _hand_finger_state(h),
+            })
+        except Exception:
+            continue
+    snap["hands"] = hands_out
+    # ---- Live gesture truth values ----
+    g: dict = {}
+    if hands_lm_list:
+        g["peace"]    = any(_is_peace_sign(h) for h in hands_lm_list)
+        g["fist"]     = any(_is_fist(h) for h in hands_lm_list)
+        g["thumbs"]   = any(_is_thumbs_up(h) for h in hands_lm_list)
+        g["ok"]       = any(_is_ok_sign(h) for h in hands_lm_list)
+    else:
+        g.update({"peace": False, "fist": False, "thumbs": False, "ok": False})
+    g["prayer"] = bool(_prayer_active)
+    g["atelierMode"] = bool(_atelier_mode)
+    snap["gestures"] = g
+    return snap
+
+
 def _detect_mouth_paste(blendshapes, now: float) -> bool:
     """Edge-triggered mouth-open → fire Cmd+V. Mirrors the mouth-click
     detector but uses its own armed flag and cooldown so a click and a
@@ -6937,12 +7362,21 @@ def _capture_loop() -> None:
         now = time.time()
         # Re-probe monitor layout periodically (cheap; updates only on change).
         _maybe_reprobe_virtual_bounds(now)
+        # 🔬 Vision-lab snapshot — published every frame for the /vision page.
+        try:
+            _vision_snapshot.clear()
+            _vision_snapshot.update(_build_vision_snapshot(
+                face_blendshapes, face_matrix, hands_lm_list, now,
+            ))
+        except Exception as e:
+            print(f"[viewer] vision snapshot err: {e}", flush=True)
         nose_y_only = face_nose[1] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
         # Head bob UP (chin lift) → Cmd+C copy + native toast.
         if (_head_copy_enabled and _system_enabled
                 and _detect_head_bob_up(nose_y_only, now)):
             print("[viewer] 🙆 head-up → cmd+c", flush=True)
+            _push_vision_event("🙆 head-up → copy")
             try:
                 _fire_hotkey("cmd+c")
                 _toast("handsfree", "copied ✂︎")
@@ -6956,6 +7390,7 @@ def _capture_loop() -> None:
                 and not _mouth_hold_enabled
                 and _detect_mouth_paste(face_blendshapes, now)):
             print("[viewer] 👄 mouth-open → cmd+v", flush=True)
+            _push_vision_event("👄 mouth-open → paste")
             try:
                 _fire_hotkey("cmd+v")
                 _toast("handsfree", "pasted 📋")
@@ -7018,9 +7453,11 @@ def _capture_loop() -> None:
             ok_evt = _update_ok_drag(hands_lm_list, now)
             if ok_evt == "lock":
                 print("[viewer] 👌 drag-lock ON", flush=True)
+                _push_vision_event("👌 drag locked")
                 _toast("handsfree", "drag locked 👌")
             elif ok_evt == "unlock":
                 print("[viewer] 👌 drag-lock OFF", flush=True)
+                _push_vision_event("👌 drag released")
                 _toast("handsfree", "drag released")
         else:
             _ok_drag_force_release()
@@ -7030,8 +7467,12 @@ def _capture_loop() -> None:
             evt = _update_peace_hold(hands_lm_list, now)
             if evt == "copy":
                 print("[viewer] peace ✌️ + push → cmd+c", flush=True)
-            elif evt is not None:
-                print(f"[viewer] peace ✌️ → mouse {evt}", flush=True)
+            elif evt == "down":
+                print("[viewer] peace ✌️ → mouse down", flush=True)
+                _push_vision_event("✌️ peace → mouseDown")
+            elif evt == "up":
+                print("[viewer] peace ✌️ → mouse up", flush=True)
+                _push_vision_event("✌️ peace → mouseUp")
         else:
             # Safety: drop any held mouse if disabled mid-hold.
             _peace_hold_force_release()
@@ -7039,6 +7480,7 @@ def _capture_loop() -> None:
         if (_thumbs_dclick_enabled and _system_enabled
                 and _detect_thumbs_dclick(hands_lm_list, now)):
             print("[viewer] thumbs 👍 → cmd+v", flush=True)
+            _push_vision_event("👍 thumbs → paste")
             try:
                 _fire_hotkey("cmd+v")
                 _toast("handsfree", "pasted 📋")
@@ -7067,6 +7509,7 @@ def _capture_loop() -> None:
                     try:
                         _fire_hotkey("cmd+=" if zdir == "in" else "cmd+-")
                         print(f"[viewer] 🤛 fist-zoom {zdir}", flush=True)
+                        _push_vision_event(f"🤛 fist zoom {zdir}")
                     except Exception as e:
                         print(f"[viewer] fist-zoom failed: {e}", flush=True)
             v_amt, h_amt = _update_fist_scroll(hands_lm_list, now)
@@ -8116,6 +8559,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/boxing":
             self._write_status(200, "text/html; charset=utf-8",
                                BOXING_HTML.encode("utf-8"))
+            return
+
+        if self.path == "/vision":
+            self._write_status(200, "text/html; charset=utf-8",
+                               VISION_HTML.encode("utf-8"))
+            return
+
+        if self.path == "/vision-stream":
+            # 10Hz SSE feed of the latest face/hand snapshot. Independent
+            # of /events so the regular UI isn't bloated with this data.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            try:
+                while not _stop.is_set():
+                    with _state_lock:
+                        snap = dict(_vision_snapshot)
+                        events = list(_vision_events)
+                    snap["events"] = events
+                    try:
+                        self.wfile.write(
+                            b"data: "
+                            + json.dumps(snap).encode("utf-8")
+                            + b"\n\n"
+                        )
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                    time.sleep(0.1)
+            except Exception:
+                pass
             return
 
         if self.path == "/stream":
