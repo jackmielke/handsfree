@@ -1,0 +1,44 @@
+#!/bin/bash
+# Wonder.app launcher — runs the handsfree daemon as a child process of
+# this bundle so macOS TCC attributes camera / microphone / speech
+# recognition permissions to the bundle (com.jackmielke.handsfree.wonder)
+# rather than to /usr/bin/python3 directly.
+#
+# We deliberately do NOT use `exec` here: keeping the bash shell as the
+# parent of the python process means macOS sees the bundle's executable
+# at the top of the process tree and propagates permissions down.
+
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE_ROOT="$(cd "$HERE/../.." && pwd)"
+PROJECT_ROOT="$(cd "$BUNDLE_ROOT/.." && pwd)"
+
+VENV_PY="$PROJECT_ROOT/.venv/bin/python"
+SCRIPT="$PROJECT_ROOT/browser_viewer.py"
+
+if [ ! -x "$VENV_PY" ]; then
+  osascript -e 'display alert "Wonder" message "Python venv not found at .venv/bin/python — run setup first."'
+  exit 1
+fi
+if [ ! -f "$SCRIPT" ]; then
+  osascript -e 'display alert "Wonder" message "browser_viewer.py not found alongside Wonder.app."'
+  exit 1
+fi
+
+cd "$PROJECT_ROOT"
+
+# If a daemon is already running, just open the UI. Otherwise launch.
+if curl -s -o /dev/null -m 0.5 http://localhost:8765/; then
+  open http://localhost:8765/
+else
+  "$VENV_PY" "$SCRIPT" &
+  # Give the server a moment to come up before opening the UI.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -s -o /dev/null -m 0.5 http://localhost:8765/; then
+      break
+    fi
+    sleep 0.5
+  done
+  open http://localhost:8765/
+  wait
+fi

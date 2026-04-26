@@ -198,16 +198,21 @@ def _open_mic_sounddevice(samplerate: int = 16000, dtype: str = "float32",
     -9986 when another app holds them)."""
     import sounddevice as sd
     devices = sd.query_devices()
-    # Build candidates: built-in / MacBook first, then everything else.
-    candidates: list = []
+    # Hard-default to the built-in MacBook mic — AirPods cause -9986
+    # PortAudio errors when other apps share the device, and sweeping
+    # through every input on macOS triggers per-device permission stalls.
+    # Only fall back to other inputs if no built-in mic is found.
+    builtin: list = []
+    others: list = []
     for i, d in enumerate(devices):
         if d.get("max_input_channels", 0) <= 0:
             continue
         nm = d.get("name", "").lower()
         if "macbook" in nm or "built-in" in nm:
-            candidates.insert(0, i)
+            builtin.append(i)
         else:
-            candidates.append(i)
+            others.append(i)
+    candidates = builtin if builtin else others
 
     def try_open(dev: int, sr: int):
         result: dict = {}
@@ -1274,6 +1279,18 @@ VISION_HTML = r"""<!doctype html>
     </div>
 
     <div class="panel">
+      <h2>🔐 mic + speech permissions</h2>
+      <div style="font-size:11px; color:var(--dim); line-height:1.5;
+           padding:8px 12px; background:#0a0a14; border-radius:6px;
+           border:1px dashed #2a2a35; margin-bottom:14px;">
+        Voice runs from <span style="color:var(--accent);">Wonder.app</span>
+        so macOS can attribute mic + speech permissions to a real bundle.<br>
+        <span style="color:var(--dim);">First time:</span>
+        <a href="javascript:void(0)" id="open-wonder"
+           style="color:var(--cool);">click here to launch Wonder.app</a>,
+        then approve Microphone and Speech Recognition prompts. After that,
+        the engine will start working.
+      </div>
       <h2>📖 command dictionary</h2>
       <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
         Voice recognizers are biased toward these phrases (Apple via
@@ -1478,6 +1495,20 @@ VISION_HTML = r"""<!doctype html>
                               engine: v2Engine.value }),
     }).catch(() => {});
   });
+  const openWonder = document.getElementById('open-wonder');
+  if (openWonder) {
+    openWonder.addEventListener('click', async () => {
+      try {
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'open_wonder_app' }) });
+        openWonder.textContent = '✓ launched — approve the prompts';
+      } catch (e) {
+        openWonder.textContent = 'failed: ' + e.message;
+      }
+    });
+  }
+
   v2Engine.addEventListener('change', () => {
     if (v2Enabled) {
       fetch('/command', { method: 'POST',
@@ -8963,6 +8994,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "click":
                 _click()
                 self._write_status(200, "application/json", b'{"ok":true}')
+                return
+            if action == "open_wonder_app":
+                # Fire `open Wonder.app` so macOS shows the permission
+                # prompts (camera / mic / speech recognition) for the
+                # bundle's Info.plist usage descriptions.
+                try:
+                    bundle_path = (Path(__file__).parent
+                                   / "Wonder.app").resolve()
+                    subprocess.Popen(["open", str(bundle_path)])
+                except Exception as e:
+                    print(f"[viewer] open Wonder.app failed: {e}", flush=True)
+                self._write_status(200, "application/json",
+                                   b'{"ok":true}')
                 return
             if action == "v2":
                 # voice2 control: { on, engine? }

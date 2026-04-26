@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Wonder</string>
+  <key>CFBundleExecutable</key>
+  <string>Wonder</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.jackmielke.handsfree.wonder</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Wonder</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSCameraUsageDescription</key>
+  <string>Wonder uses the camera for face and hand tracking, so gestures can drive the cursor and shortcuts.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Wonder uses the microphone to listen for voice commands you set up in the dictionary.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Wonder uses on-device Apple speech recognition (the same engine Siri uses) so voice commands respond instantly without going to the cloud.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Wonder sends keystrokes and clicks via System Events to drive other apps from gestures and voice.</string>
+</dict>
+</plist>
