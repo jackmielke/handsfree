@@ -1281,15 +1281,32 @@ VISION_HTML = r"""<!doctype html>
     <div class="panel">
       <h2>🔐 mic + speech permissions</h2>
       <div style="font-size:11px; color:var(--dim); line-height:1.5;
-           padding:8px 12px; background:#0a0a14; border-radius:6px;
+           padding:10px 12px; background:#0a0a14; border-radius:6px;
            border:1px dashed #2a2a35; margin-bottom:14px;">
-        Voice runs from <span style="color:var(--accent);">Wonder.app</span>
-        so macOS can attribute mic + speech permissions to a real bundle.<br>
-        <span style="color:var(--dim);">First time:</span>
-        <a href="javascript:void(0)" id="open-wonder"
-           style="color:var(--cool);">click here to launch Wonder.app</a>,
-        then approve Microphone and Speech Recognition prompts. After that,
-        the engine will start working.
+        Voice engines need Microphone (and ideally Speech Recognition)
+        permission. macOS won't prompt for these from a plain
+        <code>python script.py</code>, so we ship them via
+        <span style="color:var(--accent);">Wonder.app</span>:
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+          <button id="open-wonder"
+            style="padding:6px 12px; border-radius:6px;
+              border:1px solid var(--cool); background:#0d1420;
+              color:var(--cool); font-family:inherit; font-size:11px;
+              letter-spacing:0.14em; text-transform:uppercase;
+              cursor:pointer; font-weight:700;">
+            launch Wonder.app
+          </button>
+          <button id="test-mic"
+            style="padding:6px 12px; border-radius:6px;
+              border:1px solid #2a2a38; background:#15151c;
+              color:var(--ink); font-family:inherit; font-size:11px;
+              letter-spacing:0.14em; text-transform:uppercase;
+              cursor:pointer;">
+            test mic now
+          </button>
+          <span id="open-wonder-status" style="font-size:10px;
+                color:var(--dim);"></span>
+        </div>
       </div>
       <h2>📖 command dictionary</h2>
       <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
@@ -1488,23 +1505,76 @@ VISION_HTML = r"""<!doctype html>
       ).join('');
     }
   }
-  v2Toggle.addEventListener('click', () => {
-    fetch('/command', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'v2', on: !v2Enabled,
-                              engine: v2Engine.value }),
-    }).catch(() => {});
+  v2Toggle.addEventListener('click', async (e) => {
+    e.preventDefault();
+    // Immediate feedback so the button doesn't feel dead while the
+    // engine warms up. The SSE-driven paintV2() will overwrite shortly.
+    if (!v2Enabled) {
+      v2Status.textContent = 'starting…';
+      v2Status.style.color = 'var(--warm)';
+      v2Partial.textContent = '— spinning up ' + v2Engine.value + ' —';
+    }
+    try {
+      const r = await fetch('/command', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'v2', on: !v2Enabled,
+                                engine: v2Engine.value }) });
+      const j = await r.json();
+      console.log('[v2 toggle]', j);
+    } catch (err) {
+      v2Status.textContent = 'request failed: ' + err.message;
+      v2Status.style.color = 'var(--hot)';
+    }
   });
-  const openWonder = document.getElementById('open-wonder');
+  const openWonder       = document.getElementById('open-wonder');
+  const openWonderStatus = document.getElementById('open-wonder-status');
+  const testMicBtn       = document.getElementById('test-mic');
   if (openWonder) {
-    openWonder.addEventListener('click', async () => {
+    openWonder.addEventListener('click', async (e) => {
+      e.preventDefault();
+      openWonderStatus.textContent = 'launching…';
+      openWonderStatus.style.color = 'var(--warm)';
       try {
-        await fetch('/command', { method: 'POST',
+        const r = await fetch('/command', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'open_wonder_app' }) });
-        openWonder.textContent = '✓ launched — approve the prompts';
-      } catch (e) {
-        openWonder.textContent = 'failed: ' + e.message;
+        const j = await r.json();
+        if (j && j.ok) {
+          openWonderStatus.textContent =
+            '✓ Wonder.app opened — approve the macOS prompts';
+          openWonderStatus.style.color = 'var(--accent)';
+        } else {
+          openWonderStatus.textContent =
+            '⚠ ' + (j && j.error ? j.error : 'unknown error');
+          openWonderStatus.style.color = 'var(--hot)';
+        }
+      } catch (err) {
+        openWonderStatus.textContent = 'failed: ' + err.message;
+        openWonderStatus.style.color = 'var(--hot)';
+      }
+    });
+  }
+  if (testMicBtn) {
+    testMicBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      openWonderStatus.textContent = 'testing mic…';
+      openWonderStatus.style.color = 'var(--warm)';
+      try {
+        const r = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'test_mic' }) });
+        const j = await r.json();
+        if (j && j.ok) {
+          openWonderStatus.textContent =
+            '✓ mic OK: ' + (j.device || '?') + ' @ ' + (j.sr || '?') + 'Hz';
+          openWonderStatus.style.color = 'var(--accent)';
+        } else {
+          openWonderStatus.textContent = '✗ mic err: ' + (j.error || '?');
+          openWonderStatus.style.color = 'var(--hot)';
+        }
+      } catch (err) {
+        openWonderStatus.textContent = 'request failed: ' + err.message;
+        openWonderStatus.style.color = 'var(--hot)';
       }
     });
   }
@@ -8994,6 +9064,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "click":
                 _click()
                 self._write_status(200, "application/json", b'{"ok":true}')
+                return
+            if action == "test_mic":
+                # Non-destructive probe: tries to open the built-in mic
+                # via the same path voice2 uses. Reports success/failure
+                # so the UI can show a meaningful error.
+                try:
+                    stream, dev_idx, dev_name = _open_mic_sounddevice(
+                        16000, dtype="float32", blocksize=4000,
+                    )
+                    actual_sr = getattr(stream, "_handsfree_actual_sr", 16000)
+                    try:
+                        # Read one chunk to confirm data flows.
+                        stream.read(2000)
+                    except Exception:
+                        pass
+                    try: stream.stop(); stream.close()
+                    except Exception: pass
+                    self._write_status(
+                        200, "application/json",
+                        json.dumps({"ok": True, "device": dev_name,
+                                    "sr": actual_sr}).encode(),
+                    )
+                except Exception as e:
+                    self._write_status(
+                        200, "application/json",
+                        json.dumps({"ok": False, "error": str(e)}).encode(),
+                    )
                 return
             if action == "open_wonder_app":
                 # Fire `open Wonder.app` so macOS shows the permission
