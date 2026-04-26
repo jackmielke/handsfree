@@ -104,6 +104,338 @@ _voice_last_result: str = ""
 _voice_err: str = ""
 
 
+# --- voice2 engines and matching --------------------------------------
+
+def _v2_push_final(text: str, matched: str = "", action: str = "") -> None:
+    global _v2_finals
+    _v2_finals.insert(0, {
+        "t": time.time(),
+        "text": text,
+        "matched": matched,
+        "action": action,
+    })
+    if len(_v2_finals) > V2_FINALS_CAP:
+        _v2_finals = _v2_finals[:V2_FINALS_CAP]
+
+
+def _v2_fuzzy_match(text: str) -> tuple:
+    """Snap a transcript to the closest dictionary phrase.
+    Returns (best_phrase, ratio) or ("", 0.0)."""
+    import difflib
+    text = (text or "").lower().strip().rstrip(".,!?")
+    if not text:
+        return "", 0.0
+    # Exact wins immediately
+    if text in _v2_dict:
+        return text, 1.0
+    best = ""
+    best_r = 0.0
+    for phrase in _v2_dict:
+        r = difflib.SequenceMatcher(None, text, phrase).ratio()
+        # Reward containment: "open arc please" should snap to "open arc"
+        if phrase in text or text in phrase:
+            r = max(r, 0.85)
+        if r > best_r:
+            best_r = r
+            best = phrase
+    return best, best_r
+
+
+def _v2_dispatch_action(action: str) -> None:
+    """Run the action string from the dictionary value."""
+    try:
+        if action.startswith("open_app:"):
+            _open_app(action.split(":", 1)[1])
+        elif action.startswith("hotkey:"):
+            _fire_hotkey(action.split(":", 1)[1])
+        elif action.startswith("scroll:"):
+            _scroll(action.split(":", 1)[1])
+        elif action == "click":
+            _click()
+        elif action == "wispr_menu":
+            _tap_wispr_menu_click()
+        elif action == "voice2_off":
+            _v2_stop_engine()
+        elif action == "system_mute":
+            _set_system_mute(True)
+        elif action == "system_unmute":
+            _set_system_mute(False)
+        else:
+            print(f"[v2] unknown action {action}", flush=True)
+    except Exception as e:
+        print(f"[v2] action {action} failed: {e}", flush=True)
+
+
+def _v2_handle_final(text: str) -> None:
+    """Called once per finalized utterance from any engine."""
+    global _v2_last_match, _v2_last_action, _v2_last_match_at
+    text = (text or "").strip()
+    if not text:
+        return
+    phrase, ratio = _v2_fuzzy_match(text)
+    if phrase and ratio >= _v2_match_threshold:
+        action = _v2_dict.get(phrase, "")
+        _v2_last_match = phrase
+        _v2_last_action = action
+        _v2_last_match_at = time.time()
+        print(f"[v2] '{text}' → '{phrase}' (r={ratio:.2f}) → {action}",
+              flush=True)
+        _push_vision_event(f"🎤 {phrase}")
+        _v2_push_final(text, matched=phrase, action=action)
+        _v2_dispatch_action(action)
+    else:
+        print(f"[v2] '{text}' (no match, best r={ratio:.2f})", flush=True)
+        _v2_push_final(text)
+
+
+def _v2_loop_apple() -> None:
+    """Apple Speech framework engine. Streams partials + finals via the
+    on-device recognizer; biased toward dictionary phrases via
+    contextualStrings."""
+    global _v2_partial, _v2_status, _v2_err
+    try:
+        import Speech, AVFoundation
+        from Foundation import NSLocale, NSRunLoop, NSDate
+        import CoreFoundation
+    except Exception as e:
+        _v2_err = f"pyobjc Speech import failed: {e}"
+        _v2_status = "err"
+        return
+
+    # 1. Authorization (one-shot async). We poll status briefly.
+    auth = Speech.SFSpeechRecognizer.authorizationStatus()
+    if auth != 3:  # 3 = authorized
+        Speech.SFSpeechRecognizer.requestAuthorization_(lambda s: None)
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            if Speech.SFSpeechRecognizer.authorizationStatus() == 3:
+                break
+            time.sleep(0.1)
+        if Speech.SFSpeechRecognizer.authorizationStatus() != 3:
+            _v2_err = "speech authorization not granted (System Settings → Privacy)"
+            _v2_status = "err"
+            return
+
+    locale = NSLocale.localeWithLocaleIdentifier_("en-US")
+    recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(locale)
+    if not recognizer or not recognizer.isAvailable():
+        _v2_err = "recognizer unavailable"
+        _v2_status = "err"
+        return
+
+    audio_engine = AVFoundation.AVAudioEngine.alloc().init()
+    input_node = audio_engine.inputNode()
+    in_fmt = input_node.outputFormatForBus_(0)
+
+    request = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
+    request.setShouldReportPartialResults_(True)
+    if recognizer.supportsOnDeviceRecognition():
+        request.setRequiresOnDeviceRecognition_(True)
+    # Bias toward our dictionary so "open arc" snaps instantly.
+    request.setContextualStrings_(list(_v2_dict.keys()))
+
+    last_partial = {"t": 0.0, "text": ""}
+
+    def result_handler(result, error):
+        global _v2_partial
+        if error:
+            print(f"[v2 apple] err: {error}", flush=True)
+            return
+        if not result:
+            return
+        try:
+            text = str(result.bestTranscription().formattedString())
+        except Exception:
+            return
+        if result.isFinal():
+            _v2_partial = ""
+            _v2_handle_final(text)
+        else:
+            _v2_partial = text
+            last_partial["t"] = time.time()
+            last_partial["text"] = text
+
+    task = recognizer.recognitionTaskWithRequest_resultHandler_(
+        request, result_handler,
+    )
+
+    def install_tap(buffer, when):
+        try:
+            request.appendAudioPCMBuffer_(buffer)
+        except Exception:
+            pass
+
+    input_node.installTapOnBus_bufferSize_format_block_(
+        0, 1024, in_fmt, install_tap,
+    )
+    audio_engine.prepare()
+    ok, err = audio_engine.startAndReturnError_(None)
+    if not ok:
+        _v2_err = f"audio engine start failed: {err}"
+        _v2_status = "err"
+        return
+
+    _v2_status = "listening"
+    print("[v2 apple] listening (on-device)…", flush=True)
+
+    # Recognition tasks deliver via the runloop; we pump it from this
+    # thread until told to stop. Also, Apple ends a recognition task
+    # after a short silence — we restart it so listening is continuous.
+    rloop = NSRunLoop.currentRunLoop()
+    SILENCE_RESTART_S = 1.4
+    last_audio_at = time.time()
+    while not _v2_stop.is_set():
+        # Pump callbacks for ~50ms.
+        rloop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+        # Restart if Apple finalized the task and idle for a moment.
+        if last_partial["text"] and (time.time() - last_partial["t"]
+                                     > SILENCE_RESTART_S):
+            try:
+                request.endAudio()
+            except Exception:
+                pass
+            last_partial["text"] = ""
+            # New request for next utterance
+            request = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
+            request.setShouldReportPartialResults_(True)
+            if recognizer.supportsOnDeviceRecognition():
+                request.setRequiresOnDeviceRecognition_(True)
+            request.setContextualStrings_(list(_v2_dict.keys()))
+            task = recognizer.recognitionTaskWithRequest_resultHandler_(
+                request, result_handler,
+            )
+
+    # Tear down
+    try:
+        audio_engine.stop()
+        input_node.removeTapOnBus_(0)
+        request.endAudio()
+        task.cancel()
+    except Exception:
+        pass
+    _v2_status = "off"
+    _v2_partial = ""
+    print("[v2 apple] stopped", flush=True)
+
+
+def _v2_vosk_model_path() -> Optional[Path]:
+    """Locate the small English Vosk model. Returns path or None."""
+    home = Path.home()
+    candidates = [
+        home / "Library" / "Application Support" / "handsfree"
+             / "vosk-model-small-en-us-0.15",
+        Path(__file__).parent / "vosk-model-small-en-us-0.15",
+    ]
+    for c in candidates:
+        if (c / "conf").exists():
+            return c
+    return None
+
+
+def _v2_loop_vosk() -> None:
+    global _v2_partial, _v2_status, _v2_err
+    try:
+        import vosk
+        import sounddevice as sd
+    except Exception as e:
+        _v2_err = f"vosk/sounddevice import failed: {e}"
+        _v2_status = "err"
+        return
+    model_path = _v2_vosk_model_path()
+    if model_path is None:
+        _v2_err = ("vosk model missing — download "
+                   "vosk-model-small-en-us-0.15 to "
+                   "~/Library/Application Support/handsfree/")
+        _v2_status = "err"
+        return
+    SR = 16000
+    BLOCK_N = 4000
+    try:
+        model = vosk.Model(str(model_path))
+    except Exception as e:
+        _v2_err = f"vosk model load failed: {e}"
+        _v2_status = "err"
+        return
+    # Lock the recognizer to the dictionary as a JSON grammar — Vosk
+    # will only emit phrases composed of these tokens.
+    grammar_words = []
+    for phrase in _v2_dict:
+        for w in phrase.split():
+            if w not in grammar_words:
+                grammar_words.append(w)
+    grammar_words.append("[unk]")
+    rec = vosk.KaldiRecognizer(model, SR, json.dumps(grammar_words))
+    rec.SetWords(False)
+    try:
+        stream = sd.RawInputStream(
+            samplerate=SR, blocksize=BLOCK_N, dtype="int16", channels=1,
+        )
+        stream.start()
+    except Exception as e:
+        _v2_err = f"mic open failed: {e}"
+        _v2_status = "err"
+        return
+    _v2_status = "listening"
+    print("[v2 vosk] listening (grammar-locked)…", flush=True)
+    try:
+        while not _v2_stop.is_set():
+            try:
+                data, _ovr = stream.read(BLOCK_N)
+            except Exception as e:
+                print(f"[v2 vosk] read err: {e}", flush=True)
+                time.sleep(0.05)
+                continue
+            if rec.AcceptWaveform(bytes(data)):
+                try:
+                    res = json.loads(rec.Result())
+                    text = res.get("text", "")
+                except Exception:
+                    text = ""
+                _v2_partial = ""
+                if text:
+                    _v2_handle_final(text)
+            else:
+                try:
+                    pres = json.loads(rec.PartialResult())
+                    _v2_partial = pres.get("partial", "")
+                except Exception:
+                    pass
+    finally:
+        try:
+            stream.stop(); stream.close()
+        except Exception:
+            pass
+    _v2_status = "off"
+    _v2_partial = ""
+    print("[v2 vosk] stopped", flush=True)
+
+
+def _v2_start_engine(engine: str) -> str:
+    """Spawn the requested engine in a daemon thread. Returns status msg."""
+    global _v2_thread, _v2_engine, _v2_enabled, _v2_status, _v2_err
+    _v2_stop_engine()
+    _v2_engine = engine if engine in ("apple", "vosk") else "apple"
+    _v2_err = ""
+    _v2_status = "starting"
+    _v2_stop.clear()
+    target = _v2_loop_apple if _v2_engine == "apple" else _v2_loop_vosk
+    _v2_thread = threading.Thread(target=target, daemon=True)
+    _v2_thread.start()
+    _v2_enabled = True
+    return f"started {_v2_engine}"
+
+
+def _v2_stop_engine() -> None:
+    global _v2_thread, _v2_enabled, _v2_status, _v2_partial
+    _v2_stop.set()
+    if _v2_thread is not None:
+        _v2_thread.join(timeout=1.5)
+    _v2_thread = None
+    _v2_enabled = False
+    _v2_status = "off"
+    _v2_partial = ""
+
+
 def _voice_loop() -> None:
     """Continuous push-nothing voice loop: listen → segment → transcribe →
     dispatch. Kept conservative so it can run alongside the camera + models
@@ -576,6 +908,55 @@ VISION_HTML = r"""<!doctype html>
       <div class="feed" id="feed">(no events yet)</div>
     </div>
   </div>
+
+  <div style="grid-column:1/-1; display:grid;
+       grid-template-columns: 1fr 1fr; gap:18px; margin-top:6px;">
+    <div class="panel">
+      <h2>🎤 voice (live)</h2>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+        <button id="v2-toggle"
+          style="padding:6px 14px; border-radius:999px;
+            border:1px solid #2a2a38; background:#15151c; color:var(--ink);
+            font-family:inherit; font-size:11px; letter-spacing:0.16em;
+            text-transform:uppercase; cursor:pointer; font-weight:700;">
+          🎤 listen
+        </button>
+        <select id="v2-engine"
+          style="background:#0a0a14; color:var(--ink); border:1px solid #2a2a38;
+            border-radius:6px; padding:5px 8px; font-family:inherit;
+            font-size:11px;">
+          <option value="apple">apple speech (siri-fast)</option>
+          <option value="vosk">vosk (grammar-locked)</option>
+        </select>
+        <span id="v2-status" style="font-size:10px; color:var(--dim);
+              letter-spacing:0.18em; text-transform:uppercase;">off</span>
+      </div>
+      <div id="v2-partial"
+        style="min-height:42px; padding:10px 14px; border-radius:8px;
+        background:#0a0a14; border:1px dashed #2a2a35; color:var(--cool);
+        font-size:18px; letter-spacing:0.02em; line-height:1.4;
+        font-family:inherit; word-break:break-word;">
+        — say a command —
+      </div>
+      <div id="v2-match"
+        style="margin-top:8px; font-size:12px; color:var(--dim);">
+        last match: <span id="v2-last" style="color:var(--accent);">—</span>
+      </div>
+      <h2 style="margin-top:14px;">recent transcripts</h2>
+      <div id="v2-finals" class="feed" style="max-height:180px;">(none yet)</div>
+    </div>
+
+    <div class="panel">
+      <h2>📖 command dictionary</h2>
+      <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
+        Voice recognizers are biased toward these phrases (Apple via
+        contextualStrings, Vosk via JSON grammar). Edit the file directly
+        to add more.
+      </div>
+      <div id="v2-dict" class="feed" style="max-height:340px;
+           font-size:11px;">(loading…)</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -709,6 +1090,77 @@ VISION_HTML = r"""<!doctype html>
     }).join('');
   }
 
+  // ---- voice2 panel ----
+  const v2Toggle = document.getElementById('v2-toggle');
+  const v2Engine = document.getElementById('v2-engine');
+  const v2Status = document.getElementById('v2-status');
+  const v2Partial = document.getElementById('v2-partial');
+  const v2Last = document.getElementById('v2-last');
+  const v2Finals = document.getElementById('v2-finals');
+  const v2Dict = document.getElementById('v2-dict');
+  let v2Enabled = false;
+  function paintV2(v) {
+    if (!v) return;
+    v2Enabled = !!v.enabled;
+    v2Toggle.textContent = v2Enabled ? '🛑 stop' : '🎤 listen';
+    v2Toggle.style.background = v2Enabled ? '#0d2a1f' : '#15151c';
+    v2Toggle.style.borderColor = v2Enabled ? 'var(--accent)' : '#2a2a38';
+    v2Toggle.style.color = v2Enabled ? 'var(--accent)' : 'var(--ink)';
+    if (document.activeElement !== v2Engine && v.engine) {
+      v2Engine.value = v.engine;
+    }
+    let s = v.status || 'off';
+    if (v.err) s = 'err: ' + v.err;
+    v2Status.textContent = s;
+    v2Status.style.color = (v.status === 'listening') ? 'var(--accent)'
+                          : (v.status === 'err' || v.err) ? 'var(--hot)'
+                          : 'var(--dim)';
+    const p = v.partial || '';
+    v2Partial.textContent = p || (v2Enabled ? '— listening —' : '— say a command —');
+    v2Partial.style.color = p ? 'var(--ink)' : 'var(--dim)';
+    v2Last.textContent = v.lastMatch
+      ? (v.lastMatch + (v.lastAction ? '  →  ' + v.lastAction : ''))
+      : '—';
+    if (v.finals && v.finals.length) {
+      const now = Date.now() / 1000;
+      v2Finals.innerHTML = v.finals.map(f => {
+        const ago = Math.max(0, now - f.t);
+        const agoStr = ago < 1 ? 'now' : ago.toFixed(0) + 's';
+        const matched = f.matched
+          ? `<span style="color:var(--accent);">${f.matched}</span>`
+          : `<span style="color:var(--dim);">no match</span>`;
+        return `<div class="feed-row"><span class="lbl">"${f.text}"
+                  → ${matched}</span>
+                <span class="ago">${agoStr}</span></div>`;
+      }).join('');
+    } else {
+      v2Finals.innerHTML = '<div style="color:var(--dim);">(none yet)</div>';
+    }
+    if (v.dict && v.dict.length) {
+      const cur = v.lastMatch || '';
+      v2Dict.innerHTML = v.dict.map(p =>
+        `<div class="feed-row"><span class="lbl"
+          style="${p===cur?'color:var(--accent);font-weight:700':''}">${p}</span></div>`
+      ).join('');
+    }
+  }
+  v2Toggle.addEventListener('click', () => {
+    fetch('/command', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'v2', on: !v2Enabled,
+                              engine: v2Engine.value }),
+    }).catch(() => {});
+  });
+  v2Engine.addEventListener('change', () => {
+    if (v2Enabled) {
+      fetch('/command', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'v2', on: true,
+                                engine: v2Engine.value }),
+      }).catch(() => {});
+    }
+  });
+
   function connect() {
     const es = new EventSource('/vision-stream');
     es.onmessage = (m) => {
@@ -718,6 +1170,7 @@ VISION_HTML = r"""<!doctype html>
       paintGestures(d.gestures);
       paintHead(d.headYaw, d.headPitch);
       paintFeed(d.events);
+      paintV2(d.voice);
     };
     es.onerror = () => { es.close(); setTimeout(connect, 1500); };
   }
@@ -2259,6 +2712,18 @@ HTML = """<!doctype html>
                    color:var(--ink); border:1px solid #262634; border-radius:10px;
                    padding:10px; font-family:inherit; font-size:13px;
                    line-height:1.5;"></textarea>
+        </div>
+      </details>
+
+      <details class="sec" open>
+        <summary>activity (live)</summary>
+        <div class="sec-body">
+          <div id="recent-actions" style="font-family:ui-monospace,Menlo,monospace;
+            font-size:11px; line-height:1.7; max-height:240px; overflow:auto;
+            color:var(--ink);">
+            <span style="color:var(--dim);">no events yet — gestures and voice
+              commands will appear here</span>
+          </div>
         </div>
       </details>
 
@@ -3866,6 +4331,52 @@ HTML = """<!doctype html>
   }
 
   function connectEvents() {
+    // Subscribe to the vision stream for the activity feed in the
+    // sidebar — same data the /vision lab uses, but here we only read
+    // events + voice finals so it's lightweight.
+    (function activityFeed() {
+      const elFeed = document.getElementById('recent-actions');
+      if (!elFeed) return;
+      function paint(events, voiceFinals) {
+        const rows = [];
+        const now = Date.now() / 1000;
+        // Merge gesture events and voice finals, newest first
+        (events || []).forEach(e => rows.push({
+          t: e.t, label: e.label, kind: 'gesture',
+        }));
+        (voiceFinals || []).forEach(f => {
+          const lbl = f.matched
+            ? '🎤 ' + f.matched
+            : '🎤 "' + f.text + '" (no match)';
+          rows.push({ t: f.t, label: lbl, kind: 'voice' });
+        });
+        rows.sort((a, b) => b.t - a.t);
+        if (!rows.length) {
+          elFeed.innerHTML = '<span style="color:var(--dim);">no events yet</span>';
+          return;
+        }
+        elFeed.innerHTML = rows.slice(0, 18).map(r => {
+          const ago = Math.max(0, now - r.t);
+          const agoStr = ago < 1 ? 'now'
+                       : ago < 60 ? ago.toFixed(0) + 's'
+                                  : Math.floor(ago/60) + 'm';
+          const color = r.kind === 'voice' ? 'var(--cool)' : 'var(--accent)';
+          return `<div style="display:flex; justify-content:space-between;
+              padding:2px 0; border-bottom:1px dotted #1c1c25;">
+              <span style="color:${color};">${r.label}</span>
+              <span style="color:var(--dim);">${agoStr}</span>
+            </div>`;
+        }).join('');
+      }
+      const ves = new EventSource('/vision-stream');
+      ves.onmessage = m => {
+        let d; try { d = JSON.parse(m.data); } catch { return; }
+        paint(d.events, (d.voice || {}).finals);
+      };
+      ves.onerror = () => { ves.close();
+        setTimeout(activityFeed, 1500); };
+    })();
+
     const es = new EventSource('/events');
     es.onmessage = (e) => {
       let msg; try { msg = JSON.parse(e.data); } catch { return; }
@@ -4429,6 +4940,70 @@ _left_hand_x: Optional[float] = None
 _right_hand_x: Optional[float] = None
 _jam_mode: bool = False
 
+# ============================================================
+# 🎤 voice2 — fresh, fast voice subsystem (parallel to whisper).
+# Two pluggable engines:
+#   - "apple" : Apple's on-device Speech framework (what Siri uses).
+#   - "vosk"  : Kaldi-based local engine with a JSON grammar so the
+#               recognizer is HARD-locked to a small command dictionary
+#               (sub-100ms partials, ~zero false positives).
+# Both stream partial + final transcripts into shared state for the
+# Vision Lab. Final transcripts go through a fuzzy matcher that snaps
+# to the closest command in `_v2_dict` and fires its action.
+# ============================================================
+_v2_enabled: bool = False
+_v2_engine: str = "apple"          # "apple" | "vosk"
+_v2_partial: str = ""              # current partial transcript
+_v2_status: str = "off"            # off | starting | listening | err
+_v2_err: str = ""
+_v2_finals: list = []              # newest first; capped at 12
+V2_FINALS_CAP: int = 12
+_v2_thread: Optional[threading.Thread] = None
+_v2_stop = threading.Event()
+
+# Default command dictionary: phrase → action callable name. The keys
+# also become the contextual-strings bias passed to Apple Speech / the
+# Vosk grammar, so saying these gets snapped to instantly. Editable via
+# the /command endpoint at runtime.
+_v2_dict: dict = {
+    "open arc":            "open_app:Arc",
+    "open chrome":         "open_app:Google Chrome",
+    "open terminal":       "open_app:Terminal",
+    "open figma":          "open_app:Figma",
+    "open finder":         "open_app:Finder",
+    "open slack":          "open_app:Slack",
+    "open telegram":       "open_app:Telegram",
+    "open notes":          "open_app:Notes",
+    "open cursor":         "open_app:Cursor",
+    "open notion":         "open_app:Notion",
+    "switch tab left":     "hotkey:cmd+shift+[",
+    "switch tab right":    "hotkey:cmd+shift+]",
+    "next tab":            "hotkey:cmd+shift+]",
+    "previous tab":        "hotkey:cmd+shift+[",
+    "next desktop":        "hotkey:ctrl+right",
+    "previous desktop":    "hotkey:ctrl+left",
+    "copy":                "hotkey:cmd+c",
+    "paste":               "hotkey:cmd+v",
+    "select all":          "hotkey:cmd+a",
+    "undo":                "hotkey:cmd+z",
+    "redo":                "hotkey:cmd+shift+z",
+    "go back":             "hotkey:cmd+[",
+    "go forward":          "hotkey:cmd+]",
+    "new tab":             "hotkey:cmd+t",
+    "close tab":           "hotkey:cmd+w",
+    "scroll up":           "scroll:up",
+    "scroll down":         "scroll:down",
+    "click":               "click",
+    "dictate":             "wispr_menu",
+    "stop listening":      "voice2_off",
+    "mute":                "system_mute",
+    "unmute":              "system_unmute",
+}
+_v2_match_threshold: float = 0.55  # min ratio for a fuzzy match to fire
+_v2_last_match: str = ""           # phrase last matched
+_v2_last_action: str = ""          # action label last fired
+_v2_last_match_at: float = 0.0
+
 # 🔬 Vision-lab snapshot — last face/hand state for the /vision page.
 # Stored as a plain dict so the SSE thread can copy it cheaply under the
 # state lock without re-walking MediaPipe results.
@@ -4488,7 +5063,7 @@ _mouth_hold_down: bool = False
 # While ✌️ is shown, mouse stays down; release → mouseUp.
 # Lets you select text + drag in Figma without a rogue press-and-hold
 # from any other gesture (e.g. mouth-hold) firing accidentally.
-_peace_rclick_enabled: bool = True   # name kept for setting compat
+_peace_rclick_enabled: bool = False  # off by default — opt-in via experiments
 _peace_armed: bool = True            # legacy, unused
 _peace_last_at: float = 0.0          # legacy, unused
 _peace_hold_down: bool = False
@@ -4503,8 +5078,8 @@ _peace_push_fired: bool = False
 PUSH_COPY_BASELINE_S: float = 0.20   # average first ~200ms for baseline
 PUSH_COPY_RATIO: float = 1.32        # 32% bigger ⇒ "shoved at camera"
 
-# Thumbs up 👍 → paste (Cmd+V). (Setting name kept for state compat.)
-_thumbs_dclick_enabled: bool = True
+# Thumbs up 👍 → paste (Cmd+V). Off by default — opt-in via experiments.
+_thumbs_dclick_enabled: bool = False
 
 # Head bob UP (chin-lift) → Cmd+C copy.
 _head_copy_enabled: bool = True
@@ -5257,8 +5832,28 @@ _VOICE_MODS = {
 }
 
 
+_MOD_KEYCODES = {
+    "cmd":   55,   # left command
+    "shift": 56,   # left shift
+    "alt":   58,   # left option
+    "opt":   58,
+    "ctrl":  59,   # left control
+    "fn":    63,   # function
+}
+
+
 def _fire_hotkey(combo: str) -> bool:
-    """Parse 'cmd+t' / 'cmd+shift+a' style strings and fire via CGEvent."""
+    """Parse 'cmd+t' / 'cmd+shift+a' style strings and fire via CGEvent.
+
+    Posts EXPLICIT modifier key-down → key tap → modifier key-up events
+    so the OS sees real keystrokes (matters for apps that listen at the
+    HID layer or watch modifier-key state, e.g. Chrome/Arc treating a
+    later mouse click as Cmd+click).
+
+    Also wraps the whole sequence in a try/finally that fires modifier
+    key-up events even if posting fails partway, so we can never leave
+    Cmd / Shift / etc stuck pressed.
+    """
     if not _QUARTZ_OK:
         print("[viewer] hotkey skipped: Quartz unavailable", flush=True)
         return False
@@ -5267,9 +5862,13 @@ def _fire_hotkey(combo: str) -> bool:
         return False
     flags = 0
     keycode: Optional[int] = None
+    mods: list = []  # list of (name, keycode) in pressed order
     for p in parts:
         if p in _VOICE_MODS:
             flags |= _VOICE_MODS[p]
+            kc = _MOD_KEYCODES.get(p)
+            if kc is not None:
+                mods.append((p, kc))
         elif p in _VOICE_KEYS:
             keycode = _VOICE_KEYS[p]
         else:
@@ -5277,12 +5876,20 @@ def _fire_hotkey(combo: str) -> bool:
             return False
     if keycode is None:
         return False
+
+    posted_mods: list = []
     try:
+        # 1. Press each modifier with its own key-down event.
+        for name, kc in mods:
+            ev = CGEventCreateKeyboardEvent(None, kc, True)
+            CGEventSetFlags(ev, flags)
+            CGEventPost(kCGHIDEventTap, ev)
+            posted_mods.append((name, kc))
+        # 2. Tap the main key with all modifier flags asserted.
         down = CGEventCreateKeyboardEvent(None, keycode, True)
         up = CGEventCreateKeyboardEvent(None, keycode, False)
-        if flags:
-            CGEventSetFlags(down, flags)
-            CGEventSetFlags(up, flags)
+        CGEventSetFlags(down, flags)
+        CGEventSetFlags(up, flags)
         CGEventPost(kCGHIDEventTap, down)
         CGEventPost(kCGHIDEventTap, up)
         print(f"[viewer] hotkey fired: {combo} (kc={keycode} flags={flags:#x})",
@@ -5291,6 +5898,17 @@ def _fire_hotkey(combo: str) -> bool:
     except Exception as e:
         print(f"[viewer] hotkey failed: {e}", flush=True)
         return False
+    finally:
+        # 3. Always release modifiers in reverse order, with no flags
+        # asserted on the up events, so the modifier state cleanly
+        # returns to "nothing pressed".
+        for name, kc in reversed(posted_mods):
+            try:
+                ev = CGEventCreateKeyboardEvent(None, kc, False)
+                CGEventSetFlags(ev, 0)
+                CGEventPost(kCGHIDEventTap, ev)
+            except Exception:
+                pass
 
 
 def _tap_wispr_applescript_fn() -> None:
@@ -8015,6 +8633,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _click()
                 self._write_status(200, "application/json", b'{"ok":true}')
                 return
+            if action == "v2":
+                # voice2 control: { on, engine? }
+                turn_on = bool(data.get("on"))
+                engine  = data.get("engine") or _v2_engine
+                if turn_on:
+                    msg = _v2_start_engine(engine)
+                else:
+                    _v2_stop_engine()
+                    msg = "stopped"
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({
+                        "ok": True,
+                        "enabled": _v2_enabled,
+                        "engine": _v2_engine,
+                        "status": _v2_status,
+                        "msg": msg,
+                    }).encode(),
+                )
+                return
+            if action == "v2_dict":
+                # Replace the dictionary with caller-supplied phrases.
+                # body: { dict: { phrase: action_str } }
+                d = data.get("dict")
+                if isinstance(d, dict):
+                    global _v2_dict
+                    _v2_dict = {str(k).lower(): str(v) for k, v in d.items()}
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "dict": _v2_dict}).encode(),
+                )
+                return
             if action == "wispr_fire_menu":
                 # Fire the menu-bar click NOW so the user can verify the
                 # AppleScript actually toggles Wispr without doing the
@@ -8580,6 +9230,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         snap = dict(_vision_snapshot)
                         events = list(_vision_events)
                     snap["events"] = events
+                    snap["voice"] = {
+                        "enabled": _v2_enabled,
+                        "engine":  _v2_engine,
+                        "status":  _v2_status,
+                        "err":     _v2_err,
+                        "partial": _v2_partial,
+                        "finals":  list(_v2_finals),
+                        "lastMatch": _v2_last_match,
+                        "lastAction": _v2_last_action,
+                        "dict":    list(_v2_dict.keys()),
+                    }
                     try:
                         self.wfile.write(
                             b"data: "
