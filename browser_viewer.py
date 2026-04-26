@@ -385,6 +385,10 @@ def _v2_loop_vosk() -> None:
                 print(f"[v2 vosk] read err: {e}", flush=True)
                 time.sleep(0.05)
                 continue
+            if _v2_pause_during_wispr and _prayer_active:
+                _v2_partial = "(paused — wispr active)"
+                rec.Reset()
+                continue
             if rec.AcceptWaveform(bytes(data)):
                 try:
                     res = json.loads(rec.Result())
@@ -410,15 +414,153 @@ def _v2_loop_vosk() -> None:
     print("[v2 vosk] stopped", flush=True)
 
 
+def _v2_loop_whisper() -> None:
+    """Whisper engine — VAD-segments mic input then transcribes with the
+    already-loaded faster-whisper tiny.en model. Higher quality than the
+    small Vosk model (Vosk small struggles below 90% on natural speech;
+    whisper-tiny.en hits ~95+ for short commands), at the cost of ~200ms
+    latency per utterance instead of streaming partials.
+
+    Auto-pauses while Wispr/dictation prayer is active so they don't
+    transcribe the same words.
+    """
+    global _v2_partial, _v2_status, _v2_err
+    try:
+        import sounddevice as sd
+        import numpy as np
+        from collections import deque
+    except Exception as e:
+        _v2_err = f"sounddevice/numpy import failed: {e}"
+        _v2_status = "err"
+        return
+    SR = 16000
+    BLOCK_S = 0.1
+    BLOCK_N = int(SR * BLOCK_S)
+    SPEECH_RMS = 0.012
+    SILENCE_HANG_S = 0.6
+    PRE_ROLL_S = 0.25
+    MIN_SEGMENT_S = 0.35
+    MAX_SEGMENT_S = 6.0
+    try:
+        stream = sd.InputStream(
+            samplerate=SR, channels=1, dtype="float32", blocksize=BLOCK_N,
+        )
+        stream.start()
+    except Exception as e:
+        _v2_err = f"mic open failed: {e}"
+        _v2_status = "err"
+        return
+    try:
+        _get_whisper()
+    except Exception as e:
+        _v2_err = f"whisper model load failed: {e}"
+        _v2_status = "err"
+        try: stream.stop(); stream.close()
+        except Exception: pass
+        return
+    _v2_status = "listening"
+    print("[v2 whisper] listening (VAD-segmented, tiny.en)…", flush=True)
+    pre_roll: Deque = deque(maxlen=int(PRE_ROLL_S / BLOCK_S))
+    buf: list = []
+    in_speech = False
+    silence_s = 0.0
+    segment_s = 0.0
+    while not _v2_stop.is_set():
+        try:
+            data, _ovr = stream.read(BLOCK_N)
+        except Exception as e:
+            print(f"[v2 whisper] read err: {e}", flush=True)
+            time.sleep(0.05)
+            continue
+        # Auto-pause while Wispr/dictation is recording.
+        if _v2_pause_during_wispr and _prayer_active:
+            buf = []; in_speech = False; silence_s = 0.0
+            pre_roll.clear()
+            _v2_partial = "(paused — wispr active)"
+            continue
+        rms = float(np.sqrt(np.mean(data ** 2)))
+        is_speech = rms > SPEECH_RMS
+        if is_speech:
+            if not in_speech:
+                in_speech = True
+                buf = list(pre_roll)
+                segment_s = len(buf) * BLOCK_S
+                _v2_partial = "🎙 listening…"
+            buf.append(data.copy())
+            segment_s += BLOCK_S
+            silence_s = 0.0
+            if segment_s >= MAX_SEGMENT_S:
+                _flush_whisper_segment(buf, SR)
+                buf = []; in_speech = False; silence_s = 0.0
+                segment_s = 0.0
+        else:
+            pre_roll.append(data.copy())
+            if in_speech:
+                buf.append(data.copy())
+                segment_s += BLOCK_S
+                silence_s += BLOCK_S
+                if (silence_s >= SILENCE_HANG_S
+                        and segment_s >= MIN_SEGMENT_S):
+                    _flush_whisper_segment(buf, SR)
+                    buf = []; in_speech = False; silence_s = 0.0
+                    segment_s = 0.0
+            else:
+                _v2_partial = ""
+    try:
+        stream.stop(); stream.close()
+    except Exception:
+        pass
+    _v2_status = "off"
+    _v2_partial = ""
+    print("[v2 whisper] stopped", flush=True)
+
+
+def _flush_whisper_segment(blocks: list, sr: int) -> None:
+    """Concatenate VAD-buffered audio blocks and run whisper on them."""
+    global _v2_partial
+    try:
+        import numpy as np
+    except Exception:
+        return
+    try:
+        audio = np.concatenate(blocks).flatten().astype("float32")
+        if audio.shape[0] == 0:
+            return
+        _v2_partial = "🤔 transcribing…"
+        wm = _get_whisper()
+        # initial_prompt biases the recognizer toward our command words.
+        prompt = ", ".join(_v2_dict.keys())
+        segments, _info = wm.transcribe(
+            audio,
+            language="en",
+            beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+            initial_prompt=prompt,
+        )
+        text = " ".join(s.text.strip() for s in segments).strip()
+        _v2_partial = ""
+        if text:
+            _v2_handle_final(text)
+    except Exception as e:
+        print(f"[v2 whisper] transcribe failed: {e}", flush=True)
+        _v2_partial = ""
+
+
 def _v2_start_engine(engine: str) -> str:
     """Spawn the requested engine in a daemon thread. Returns status msg."""
     global _v2_thread, _v2_engine, _v2_enabled, _v2_status, _v2_err
     _v2_stop_engine()
-    _v2_engine = engine if engine in ("apple", "vosk") else "apple"
+    _v2_engine = engine if engine in ("apple", "vosk", "whisper") else "whisper"
     _v2_err = ""
     _v2_status = "starting"
     _v2_stop.clear()
-    target = _v2_loop_apple if _v2_engine == "apple" else _v2_loop_vosk
+    if _v2_engine == "apple":
+        target = _v2_loop_apple
+    elif _v2_engine == "vosk":
+        target = _v2_loop_vosk
+    else:
+        target = _v2_loop_whisper
     _v2_thread = threading.Thread(target=target, daemon=True)
     _v2_thread.start()
     _v2_enabled = True
@@ -925,8 +1067,9 @@ VISION_HTML = r"""<!doctype html>
           style="background:#0a0a14; color:var(--ink); border:1px solid #2a2a38;
             border-radius:6px; padding:5px 8px; font-family:inherit;
             font-size:11px;">
+          <option value="whisper">whisper tiny (best quality, local)</option>
           <option value="apple">apple speech (siri-fast)</option>
-          <option value="vosk">vosk (grammar-locked)</option>
+          <option value="vosk">vosk (grammar-locked, fastest)</option>
         </select>
         <span id="v2-status" style="font-size:10px; color:var(--dim);
               letter-spacing:0.18em; text-transform:uppercase;">off</span>
@@ -4952,7 +5095,10 @@ _jam_mode: bool = False
 # to the closest command in `_v2_dict` and fires its action.
 # ============================================================
 _v2_enabled: bool = False
-_v2_engine: str = "apple"          # "apple" | "vosk"
+_v2_engine: str = "whisper"        # "apple" | "vosk" | "whisper"
+# Auto-pause voice2 while a Wispr/dictation gesture is active so the
+# two systems don't fight over the same mic + transcribe the same words.
+_v2_pause_during_wispr: bool = True
 _v2_partial: str = ""              # current partial transcript
 _v2_status: str = "off"            # off | starting | listening | err
 _v2_err: str = ""
