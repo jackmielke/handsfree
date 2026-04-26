@@ -5428,7 +5428,7 @@ MOUTH_PASTE_COOLDOWN_S: float = 0.7  # quiet period between pastes
 # to TOGGLE mouseDown on; flash again to release. Lets you start a
 # drag, walk over to the cursor, and release without holding ✌️ up the
 # whole time.
-_ok_drag_enabled: bool = True
+_ok_drag_enabled: bool = False
 _ok_drag_armed: bool = True
 _ok_drag_last_at: float = 0.0
 _ok_drag_locked: bool = False
