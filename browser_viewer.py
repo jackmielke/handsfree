@@ -1486,6 +1486,7 @@ HTML = """<!doctype html>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
+        <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
         <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to paste (Cmd+V).">👍 paste</button>
         <button class="cc-opt" data-exp="fist_zoom" title="While the fist (grab) is held, push your hand toward the camera to zoom in, pull it back to zoom out. Side-to-side still pans.">🤛 fist depth zoom</button>
@@ -1574,6 +1575,10 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-v="wink">either wink</button>
         <button class="cc-opt" data-v="mouth">mouth open</button>
         <button class="cc-opt" data-v="pinch">pinch</button>
+        <button class="cc-opt" data-v="smile" title="Smile to click. Looks natural in meetings — no awkward face poses on camera.">😊 smile</button>
+        <button class="cc-opt" id="cc-click-test"
+          title="Fire a real click right now so you can verify the cursor lands where you want."
+          style="background:#1a1a22; color:var(--dim); border:1px dashed #444;">test click</button>
       </div>
     </div>
     <div class="cc-row">
@@ -2758,6 +2763,20 @@ HTML = """<!doctype html>
   });
   ccClick.addEventListener('click', (e) => {
     const b = e.target.closest('.cc-opt'); if (!b) return;
+    if (b.id === 'cc-click-test') {
+      // Fire a real click immediately so the user can verify behavior.
+      fetch('/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'test_click' }),
+      }).catch(() => {});
+      // brief visual blip
+      b.style.background = '#6ee7b7'; b.style.color = '#05170f';
+      setTimeout(() => { b.style.background = '#1a1a22';
+                         b.style.color = 'var(--dim)'; }, 220);
+      return;
+    }
+    if (!b.dataset.v) return;
     paintActive(ccClick, b.dataset.v);
     postMethod({ click: b.dataset.v });
   });
@@ -3583,6 +3602,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="fist_zoom"]');
         if (b) b.classList.toggle('on', !!msg.fistZoom);
       }
+      if ('okDrag' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="ok_drag"]');
+        if (b) b.classList.toggle('on', !!msg.okDrag);
+      }
       if ('atelierEnabled' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="atelier"]');
         if (b) b.classList.toggle('on', !!msg.atelierEnabled);
@@ -4079,6 +4102,18 @@ _thumbs_dclick_enabled: bool = True
 # Head bob UP (chin-lift) → Cmd+C copy.
 _head_copy_enabled: bool = True
 
+# 👌 OK-sign drag lock — alternative press-and-hold. Flash an OK-sign
+# (thumb-tip + index-tip touching, middle/ring/pinky extended outward)
+# to TOGGLE mouseDown on; flash again to release. Lets you start a
+# drag, walk over to the cursor, and release without holding ✌️ up the
+# whole time.
+_ok_drag_enabled: bool = True
+_ok_drag_armed: bool = True
+_ok_drag_last_at: float = 0.0
+_ok_drag_locked: bool = False
+OK_DRAG_COOLDOWN_S: float = 0.55
+OK_TOUCH_THR: float = 0.055   # thumb↔index tip distance for "touching"
+
 # Fist depth zoom: while fist is held, hand moving toward camera = Cmd+=
 # (zoom in), away from camera = Cmd+- (zoom out). Lateral motion still
 # pans/scrolls as before.
@@ -4301,6 +4336,31 @@ _virt_h = _virt_y1 - _virt_y0
 print(f"[viewer] virtual screen: ({_virt_x0:.0f},{_virt_y0:.0f}) → "
       f"({_virt_x1:.0f},{_virt_y1:.0f})  size {_virt_w:.0f}x{_virt_h:.0f}  "
       f"(primary {_screen_w}x{_screen_h})", flush=True)
+# Re-probe the virtual screen bounds periodically so newly-plugged-in
+# monitors become reachable without restarting the daemon.
+_virt_last_probe_at: float = 0.0
+VIRT_PROBE_INTERVAL_S: float = 3.0
+
+
+def _maybe_reprobe_virtual_bounds(now: float) -> None:
+    global _virt_x0, _virt_y0, _virt_x1, _virt_y1, _virt_w, _virt_h
+    global _virt_last_probe_at
+    if now - _virt_last_probe_at < VIRT_PROBE_INTERVAL_S:
+        return
+    _virt_last_probe_at = now
+    try:
+        x0, y0, x1, y1 = _virtual_screen_bounds()
+    except Exception:
+        return
+    if (abs(x0 - _virt_x0) > 0.5 or abs(y0 - _virt_y0) > 0.5
+            or abs(x1 - _virt_x1) > 0.5 or abs(y1 - _virt_y1) > 0.5):
+        _virt_x0, _virt_y0, _virt_x1, _virt_y1 = x0, y0, x1, y1
+        _virt_w = _virt_x1 - _virt_x0
+        _virt_h = _virt_y1 - _virt_y0
+        print(f"[viewer] 🖥 virtual screen UPDATED: "
+              f"({_virt_x0:.0f},{_virt_y0:.0f}) → "
+              f"({_virt_x1:.0f},{_virt_y1:.0f})  "
+              f"size {_virt_w:.0f}x{_virt_h:.0f}", flush=True)
 
 _cursor_enabled = True
 _cursor_calibrated = False
@@ -5166,6 +5226,8 @@ def _set_master(on: bool, source: str = "") -> None:
         _mouth_hold_release()
         # Release any mouse button held via peace ✌️ hold-to-drag.
         _peace_hold_force_release()
+        # Release any mouse button held via 👌 drag-lock.
+        _ok_drag_force_release()
         # Timeout = silence: mute system audio so videos / music pause
         # being audible while the user is heads-down.
         if was_on:
@@ -6319,6 +6381,66 @@ def _peace_hold_force_release() -> None:
     _peace_hold_release_at = 0.0
 
 
+def _is_ok_sign(hand) -> bool:
+    """👌 OK sign: thumb tip (4) and index tip (8) touching, with
+    middle/ring/pinky extended outward (not curled). Different from a
+    pinch click in that the other three fingers are clearly extended,
+    so it's a deliberate pose rather than a passing pinch."""
+    t = hand[4]; i = hand[8]
+    # Tips touching
+    d = ((t.x - i.x) ** 2 + (t.y - i.y) ** 2) ** 0.5
+    if d > OK_TOUCH_THR:
+        return False
+    # Other three fingers extended (tips clearly above their PIPs)
+    return (_finger_extended(hand, 12, 10)
+            and _finger_extended(hand, 16, 14)
+            and _finger_extended(hand, 20, 18))
+
+
+def _update_ok_drag(hands_lm_list, now: float) -> Optional[str]:
+    """Edge-trigger 👌 → toggle mouseDown. Returns 'lock' on engage,
+    'unlock' on release, else None."""
+    global _ok_drag_armed, _ok_drag_last_at, _ok_drag_locked
+    match = bool(hands_lm_list) and any(
+        _is_ok_sign(h) for h in hands_lm_list
+    )
+    if not match:
+        _ok_drag_armed = True
+        return None
+    if not _ok_drag_armed:
+        return None
+    if now - _ok_drag_last_at < OK_DRAG_COOLDOWN_S:
+        return None
+    _ok_drag_armed = False
+    _ok_drag_last_at = now
+    # Toggle
+    if _ok_drag_locked:
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+        _ok_drag_locked = False
+        return "unlock"
+    try:
+        pyautogui.mouseDown(_pause=False)
+    except Exception:
+        return None
+    _ok_drag_locked = True
+    return "lock"
+
+
+def _ok_drag_force_release() -> None:
+    """Release any 👌-locked mouse on master-off / disable."""
+    global _ok_drag_locked, _ok_drag_armed
+    if _ok_drag_locked:
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+    _ok_drag_locked = False
+    _ok_drag_armed = True
+
+
 def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
     if not hands_lm_list:
         globals()['_thumbs_armed'] = True
@@ -6404,6 +6526,10 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
         primary = _detect_right_wink_click(blendshapes, now)
     elif _click_method == "blink":
         primary = _detect_blink_click(blendshapes, now)
+    elif _click_method == "smile":
+        # Smile-to-click: looks natural on camera. Reuses the same detector
+        # the right-click path uses, so you can't pick smile for both.
+        primary = _detect_smile_rightclick(blendshapes, now)
     elif _click_method == "mouth":
         if _mouth_hold_enabled:
             _update_mouth_hold(blendshapes, now)
@@ -6562,6 +6688,8 @@ def _capture_loop() -> None:
         _update_motion(face_nose, hand_wrists)
 
         now = time.time()
+        # Re-probe monitor layout periodically (cheap; updates only on change).
+        _maybe_reprobe_virtual_bounds(now)
         nose_y_only = face_nose[1] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
         # Head bob UP (chin lift) → Cmd+C copy + native toast.
@@ -6625,6 +6753,17 @@ def _capture_loop() -> None:
             if punches:
                 with _state_lock:
                     _punch_pending.extend(punches)
+        # 👌 OK-sign drag lock — toggle mouseDown without holding a pose.
+        if _ok_drag_enabled and _system_enabled:
+            ok_evt = _update_ok_drag(hands_lm_list, now)
+            if ok_evt == "lock":
+                print("[viewer] 👌 drag-lock ON", flush=True)
+                _toast("handsfree", "drag locked 👌")
+            elif ok_evt == "unlock":
+                print("[viewer] 👌 drag-lock OFF", flush=True)
+                _toast("handsfree", "drag released")
+        else:
+            _ok_drag_force_release()
         # Peace sign ✌️ → press-and-hold the mouse (hold-to-drag).
         # Push the held ✌️ toward the camera → Cmd+C (copy).
         if _peace_rclick_enabled and _system_enabled:
@@ -7173,6 +7312,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _click()
                 self._write_status(200, "application/json", b'{"ok":true}')
                 return
+            if action == "test_click":
+                # Manual primary-click for verifying the cursor lands right.
+                try:
+                    pyautogui.click(_pause=False)
+                except Exception as e:
+                    print(f"[viewer] test click failed: {e}", flush=True)
+                self._write_status(200, "application/json", b'{"ok":true}')
+                return
             if action == "volume":
                 _volume(target)
                 self._write_status(200, "application/json", b'{"ok":true}')
@@ -7231,7 +7378,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         _pointing_method = pointing
                         changed = True
                 if click in ("wink", "brow", "pinch", "blink",
-                             "right_wink", "mouth"):
+                             "right_wink", "mouth", "smile"):
                     _click_method = click
                 if changed:
                     # Swapping pointing method ⇒ re-calibrate on next frame.
@@ -7483,6 +7630,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._write_status(
                     200, "application/json",
                     json.dumps({"ok": True, "fistZoom": _fist_zoom_enabled}).encode(),
+                )
+                return
+            if action == "ok_drag":
+                global _ok_drag_enabled
+                _ok_drag_enabled = bool(data.get("on"))
+                if not _ok_drag_enabled:
+                    _ok_drag_force_release()
+                print(f"[viewer] ok-drag = {_ok_drag_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True, "okDrag": _ok_drag_enabled}).encode(),
                 )
                 return
             if action == "boxing":
@@ -7776,6 +7934,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "thumbsDclick": _thumbs_dclick_enabled,
                         "headCopy": _head_copy_enabled,
                         "fistZoom": _fist_zoom_enabled,
+                        "okDrag": _ok_drag_enabled,
                         "atelierEnabled": _atelier_enabled,
                         "atelierMode": _atelier_mode,
                         "releaseExtraTap": _wispr_release_extra_tap,
