@@ -314,9 +314,14 @@ def _v2_handle_final(text: str) -> None:
             _push_vision_event("🟢 standby")
             _v2_push_final(text, matched=matched_disarm, action="standby")
             _toast("Wonder", "later 👋 — standby")
+            _play_sound("Submarine")    # low, deliberate goodbye blip
         else:
+            print(f"[v2] disarm-but-already-standby '{matched_disarm}'",
+                  flush=True)
             _v2_push_final(text, matched=matched_disarm,
                            action="(already standby)")
+            _toast("Wonder", "already on standby 🟢")
+            _play_sound("Tink")         # short, "got it" acknowledgment
         return
     if matched_arm:
         if not _v2_command_mode:
@@ -327,9 +332,14 @@ def _v2_handle_final(text: str) -> None:
             _push_vision_event("🟠 commands armed")
             _v2_push_final(text, matched=matched_arm, action="armed")
             _toast("Wonder", "armed 🟠 — go")
+            _play_sound("Glass")        # bright, ready-to-go ding
         else:
+            print(f"[v2] arm-but-already-armed '{matched_arm}'",
+                  flush=True)
             _v2_push_final(text, matched=matched_arm,
                            action="(already armed)")
+            _toast("Wonder", "I'm already here 🟠")
+            _play_sound("Pop")          # quick blip, "yes I'm listening"
         return
     # 2. Auto-disarm if Wispr Flow / dictation is active. Prevents voice
     # commands from firing on words you're dictating into another app.
@@ -3335,6 +3345,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-v="two_hands" title="Raise both hands; move them together to scroll">two hands</button>
         <button class="cc-opt" data-v="head_lefthand" title="Raise left hand, then tilt chin up/down">✋ + head</button>
         <button class="cc-opt" data-v="head_mouth" title="Open mouth to gate, then tilt chin up/down">👄 + head</button>
+        <button class="cc-opt" data-v="head_squint" title="Squint either eye (>50%) to gate, then tilt chin up/down to scroll">😑 squint + head</button>
         <button class="cc-opt" data-v="brow" title="Raise eyebrows = up, furrow = down">🙁 brows</button>
         <button class="cc-opt" data-v="head_always" title="Always on — head pitch scrolls any time. Drifty.">head only</button>
       </div>
@@ -6152,7 +6163,7 @@ _scroll_sens_mult: float = 3.0
 # to scroll (new default — works single-handed, cursor freezes while fist
 # is closed). "two_hands" = legacy mode (raise both hands then move them).
 # "off" = disabled.
-_scroll_mode: str = "fist"
+_scroll_mode: str = "head_squint"  # squint either eye, tilt chin to scroll
 _fist_scroll_prev: Optional[tuple] = None  # (y, x) normalized
 
 # Head-pitch scroll: tilt chin up/down to scroll, gated by a chosen signal.
@@ -7570,6 +7581,15 @@ def _update_head_scroll(hands_list, face_nose, blendshapes,
                 if b.category_name == "jawOpen":
                     active = float(b.score) > MOUTH_CLICK_THRESHOLD
                     break
+    elif gate == "squint":
+        # Either-eye squint above 50% gates head-pitch scrolling.
+        # Comfortable, hands-free, and clearly intentional.
+        if blendshapes:
+            l = r = 0.0
+            for b in blendshapes:
+                if b.category_name == "eyeSquintLeft":  l = float(b.score)
+                elif b.category_name == "eyeSquintRight": r = float(b.score)
+            active = max(l, r) > 0.5
     elif gate == "always":
         active = True
     if not active:
@@ -8396,6 +8416,24 @@ def _detect_peace_rclick(hands_lm_list, now: float) -> bool:
     return _edge_trigger_gesture(match, '_peace_armed', '_peace_last_at', now)
 
 
+def _play_sound(name: str = "Glass") -> None:
+    """Play a system sound non-blocking via `afplay`. Names are the
+    system sounds in /System/Library/Sounds (Glass, Hero, Submarine,
+    Funk, Pop, Tink, Ping, Blow, etc)."""
+    def _go():
+        try:
+            path = f"/System/Library/Sounds/{name}.aiff"
+            subprocess.run(
+                ["afplay", "-v", "0.7", path],
+                check=False, timeout=4.0,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def _toast(title: str, message: str = "") -> None:
     """Native macOS notification (pops outside the browser).
 
@@ -9132,10 +9170,12 @@ def _capture_loop() -> None:
                     pyautogui.scroll(scroll_amt, _pause=False)
                 except Exception as e:
                     print(f"[viewer] scroll failed: {e}", flush=True)
-        elif _scroll_mode in ("head_lefthand", "head_mouth", "head_always"):
+        elif _scroll_mode in ("head_lefthand", "head_mouth", "head_squint",
+                              "head_always"):
             gate = {
                 "head_lefthand": "lefthand",
                 "head_mouth":    "mouth",
+                "head_squint":   "squint",
                 "head_always":   "always",
             }[_scroll_mode]
             scroll_amt = _update_head_scroll(
@@ -9919,7 +9959,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "scroll_mode":
                 mode = data.get("mode")
                 if mode in ("fist", "two_hands", "off",
-                            "head_lefthand", "head_mouth",
+                            "head_lefthand", "head_mouth", "head_squint",
                             "head_always", "brow"):
                     _scroll_mode = mode
                     _scroll_gesture_enabled = (mode != "off")
