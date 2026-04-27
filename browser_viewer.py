@@ -270,7 +270,7 @@ def _v2_dispatch_action(action: str) -> None:
             # interpret your dictation as commands.
             _v2_command_mode = False
             _v2_command_mode_at = time.time()
-            _push_vision_event("🟢 auto-disarm (wispr started)")
+            _push_vision_event("🟠 auto-disarm (wispr started)")
         elif action == "voice2_off":
             _v2_stop_engine()
         elif action == "system_mute":
@@ -311,16 +311,16 @@ def _v2_handle_final(text: str) -> None:
             _v2_command_mode_at = time.time()
             print(f"[v2] disarm via '{matched_disarm}' (heard: '{text}')",
                   flush=True)
-            _push_vision_event("🟢 standby")
+            _push_vision_event("🟠 standby")
             _v2_push_final(text, matched=matched_disarm, action="standby")
-            _toast("Wonder", "later 👋 — standby")
+            _toast("Wonder", "later 👋 — standby 🟠")
             _play_sound("Submarine")    # low, deliberate goodbye blip
         else:
             print(f"[v2] disarm-but-already-standby '{matched_disarm}'",
                   flush=True)
             _v2_push_final(text, matched=matched_disarm,
                            action="(already standby)")
-            _toast("Wonder", "already on standby 🟢")
+            _toast("Wonder", "already on standby 🟠")
             _play_sound("Tink")         # short, "got it" acknowledgment
         return
     if matched_arm:
@@ -329,16 +329,18 @@ def _v2_handle_final(text: str) -> None:
             _v2_command_mode_at = time.time()
             print(f"[v2] arm via '{matched_arm}' (heard: '{text}')",
                   flush=True)
-            _push_vision_event("🟠 commands armed")
+            _push_vision_event("🟢 commands armed")
             _v2_push_final(text, matched=matched_arm, action="armed")
-            _toast("Wonder", "armed 🟠 — go")
-            _play_sound("Glass")        # bright, ready-to-go ding
+            _toast("Wonder", "armed 🟢 — go")
+            _play_sound("Bottle")       # hollow knock — distinct from
+                                        # the Claude-finish chime users
+                                        # are already used to.
         else:
             print(f"[v2] arm-but-already-armed '{matched_arm}'",
                   flush=True)
             _v2_push_final(text, matched=matched_arm,
                            action="(already armed)")
-            _toast("Wonder", "I'm already here 🟠")
+            _toast("Wonder", "I'm already here 🟢")
             _play_sound("Pop")          # quick blip, "yes I'm listening"
         return
     # 2. Auto-disarm if Wispr Flow / dictation is active. Prevents voice
@@ -346,7 +348,7 @@ def _v2_handle_final(text: str) -> None:
     if _prayer_active and _v2_command_mode:
         _v2_command_mode = False
         print(f"[v2] auto-disarm (wispr active)", flush=True)
-        _push_vision_event("🟢 auto-disarm (wispr)")
+        _push_vision_event("🟠 auto-disarm (wispr)")
     # 3. Command-mode gate.
     if not _v2_command_mode:
         # Log the transcript so it shows in the feed, but don't fire.
@@ -1758,27 +1760,29 @@ VISION_HTML = r"""<!doctype html>
       v2Toggle.style.borderColor = '#2a2a38';
       v2Toggle.style.color = 'var(--ink)';
     } else if (v2CommandMode) {
-      v2ModeEmoji.textContent = '🟠';
+      // Armed: green = "go, listening, active".
+      v2ModeEmoji.textContent = '🟢';
       v2ModeTitle.textContent = 'commands armed';
-      v2ModeTitle.style.color = 'var(--warm)';
+      v2ModeTitle.style.color = 'var(--accent)';
       v2ModeSub.innerHTML =
         'speak any command from the dictionary → · ' +
         'say <span style="color:var(--ink); font-weight:700;">"bye wonder"</span> to disarm';
       v2Toggle.textContent = 'disarm';
-      v2Toggle.style.background = '#2a1a08';
-      v2Toggle.style.borderColor = 'var(--warm)';
-      v2Toggle.style.color = 'var(--warm)';
+      v2Toggle.style.background = '#0d2a1f';
+      v2Toggle.style.borderColor = 'var(--accent)';
+      v2Toggle.style.color = 'var(--accent)';
     } else {
-      v2ModeEmoji.textContent = '🟢';
+      // Standby: orange = "idle, not listening for commands".
+      v2ModeEmoji.textContent = '🟠';
       v2ModeTitle.textContent = 'standby';
-      v2ModeTitle.style.color = 'var(--accent)';
+      v2ModeTitle.style.color = 'var(--warm)';
       v2ModeSub.innerHTML =
         'say <span style="color:var(--ink); font-weight:700;">"hey wonder"</span>' +
         ' to arm commands · or click arm →';
       v2Toggle.textContent = 'arm';
-      v2Toggle.style.background = '#0d2a1f';
-      v2Toggle.style.borderColor = 'var(--accent)';
-      v2Toggle.style.color = 'var(--accent)';
+      v2Toggle.style.background = '#2a1a08';
+      v2Toggle.style.borderColor = 'var(--warm)';
+      v2Toggle.style.color = 'var(--warm)';
     }
     // ---- Engine controls ----
     if (document.activeElement !== v2Engine && v.engine) {
@@ -3346,6 +3350,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-v="head_lefthand" title="Raise left hand, then tilt chin up/down">✋ + head</button>
         <button class="cc-opt" data-v="head_mouth" title="Open mouth to gate, then tilt chin up/down">👄 + head</button>
         <button class="cc-opt" data-v="head_squint" title="Squint either eye (>50%) to gate, then tilt chin up/down to scroll">😑 squint + head</button>
+        <button class="cc-opt" data-v="squint_hand" title="Squint either eye (>50%) to gate, then move any hand up/down to scroll. RSI-friendly default.">😑 squint + hand</button>
         <button class="cc-opt" data-v="brow" title="Raise eyebrows = up, furrow = down">🙁 brows</button>
         <button class="cc-opt" data-v="head_always" title="Always on — head pitch scrolls any time. Drifty.">head only</button>
       </div>
@@ -6163,7 +6168,7 @@ _scroll_sens_mult: float = 3.0
 # to scroll (new default — works single-handed, cursor freezes while fist
 # is closed). "two_hands" = legacy mode (raise both hands then move them).
 # "off" = disabled.
-_scroll_mode: str = "head_squint"  # squint either eye, tilt chin to scroll
+_scroll_mode: str = "squint_hand"  # squint either eye, hand y → scroll
 _fist_scroll_prev: Optional[tuple] = None  # (y, x) normalized
 
 # Head-pitch scroll: tilt chin up/down to scroll, gated by a chosen signal.
@@ -7549,6 +7554,63 @@ def _update_fist_scroll(hands_list, now: float) -> tuple[int, int]:
             h_amt = int(_fist_scroll_accum_x)
             _fist_scroll_accum_x -= h_amt
     return v_amt, h_amt
+
+
+def _update_squint_hand_scroll(hands_list, blendshapes,
+                               now: float) -> int:
+    """Squint either eye (>50%) to gate; move any visible hand up/down
+    to scroll. Hand Y position is captured the moment squint engages and
+    becomes the zero — moving the hand below that scrolls down, above
+    scrolls up. RSI-friendly: no fist required, no head tilting.
+    Returns signed scroll amount; negative = down, positive = up.
+    """
+    global _head_scroll_baseline_y, _head_scroll_accum, _scroll_active
+    if _jam_mode:
+        _head_scroll_baseline_y = None
+        _head_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    # Gate: squint > 0.5 on either eye.
+    squint = 0.0
+    if blendshapes:
+        l = r = 0.0
+        for b in blendshapes:
+            if   b.category_name == "eyeSquintLeft":  l = float(b.score)
+            elif b.category_name == "eyeSquintRight": r = float(b.score)
+        squint = max(l, r)
+    if squint <= 0.5:
+        _head_scroll_baseline_y = None
+        _head_scroll_accum = 0.0
+        _scroll_active = False
+        return 0
+    # Pick the hand to track — prefer the higher one (most likely the
+    # intentional one). Fall back to first available.
+    if not hands_list:
+        return 0
+    best_y = None
+    for h in hands_list:
+        try:
+            y = float(h[0].y)
+            if best_y is None or y < best_y:
+                best_y = y
+        except Exception:
+            continue
+    if best_y is None:
+        return 0
+    _scroll_active = True
+    if _head_scroll_baseline_y is None:
+        _head_scroll_baseline_y = best_y
+        _head_scroll_accum = 0.0
+        return 0
+    # Hand UP in image space = wrist y DECREASES → positive delta = up scroll.
+    delta = _head_scroll_baseline_y - best_y
+    gain = BASE_SCROLL_GAIN * _scroll_sens_mult * 0.5
+    _head_scroll_accum += delta * gain * (1.0 / 30.0)  # ~per-frame increment
+    if abs(_head_scroll_accum) >= 1.0:
+        amt = int(_head_scroll_accum)
+        _head_scroll_accum -= amt
+        return amt
+    return 0
 
 
 def _update_head_scroll(hands_list, face_nose, blendshapes,
@@ -9170,6 +9232,16 @@ def _capture_loop() -> None:
                     pyautogui.scroll(scroll_amt, _pause=False)
                 except Exception as e:
                     print(f"[viewer] scroll failed: {e}", flush=True)
+        elif _scroll_mode == "squint_hand":
+            scroll_amt = _update_squint_hand_scroll(
+                hands_lm_list, face_blendshapes, now,
+            )
+            if scroll_amt != 0 and _system_enabled and _scroll_gesture_enabled:
+                try:
+                    pyautogui.scroll(scroll_amt, _pause=False)
+                except Exception as e:
+                    print(f"[viewer] squint-hand scroll failed: {e}",
+                          flush=True)
         elif _scroll_mode in ("head_lefthand", "head_mouth", "head_squint",
                               "head_always"):
             gate = {
@@ -9960,7 +10032,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 mode = data.get("mode")
                 if mode in ("fist", "two_hands", "off",
                             "head_lefthand", "head_mouth", "head_squint",
-                            "head_always", "brow"):
+                            "head_always", "brow", "squint_hand"):
                     _scroll_mode = mode
                     _scroll_gesture_enabled = (mode != "off")
                     print(f"[viewer] scroll mode = {_scroll_mode}", flush=True)
