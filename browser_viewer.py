@@ -3142,7 +3142,7 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
-        <button class="cc-opt" data-exp="mouth_hold" title="Open your mouth and hold it open to press-and-hold the mouse button. Close mouth to release. Works alongside any click method except 'mouth open'.">😮 mouth press-and-hold</button>
+        <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
         <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
@@ -7375,6 +7375,8 @@ def _set_master(on: bool, source: str = "") -> None:
         _release_wispr_key_up()
         # Release any mouse button held via mouth-hold experiment.
         _mouth_hold_release()
+        # Release any mouse button held via the click long-press hybrid.
+        _click_hybrid_force_release()
         # Release any mouse button held via peace ✌️ hold-to-drag.
         _peace_hold_force_release()
         # Release any mouse button held via 👌 drag-lock.
@@ -7948,14 +7950,130 @@ def _detect_mouth_click(blendshapes, now: float) -> bool:
     return fired
 
 
-# Hybrid mouth detector state — replaces the older binary
-# click-vs-hold split with a long-press model:
-#   - jaw opens, we wait
-#   - if jaw closes within MOUTH_HOLD_MIN_S → fire a single click
-#   - if jaw stays open past MOUTH_HOLD_MIN_S → mouseDown (drag mode)
-#     and on close → mouseUp
-_mouth_hybrid_state: str = "closed"   # 'closed' | 'pending' | 'held'
-_mouth_open_at: float = 0.0
+# --- Generalized click long-press hybrid -----------------------------
+# State machine that turns ANY continuous "is the gesture currently
+# active?" signal into:
+#   - short hold (< MOUTH_HOLD_MIN_S) → single click on release
+#   - long hold (≥ MOUTH_HOLD_MIN_S) → mouseDown immediately, mouseUp on release
+# Active for: brow, smile, mouth, pinch. Wink/blink stay edge-only since
+# you can't really "hold" them.
+_click_hybrid_state: str = "released"   # 'released' | 'pending' | 'held'
+_click_active_at: float = 0.0
+_click_hybrid_method: str = ""          # which method drove the current state
+
+
+def _gesture_active(method: str, blendshapes, hands_lm_list):
+    """For a given click method, return (active_now, clearly_released).
+    Hysteresis baked in via two thresholds."""
+    if method == "brow":
+        if not blendshapes:
+            return False, True
+        v = 0.0
+        for b in blendshapes:
+            if b.category_name in ("browInnerUp", "browOuterUpLeft",
+                                    "browOuterUpRight"):
+                v = max(v, float(b.score))
+        return v > BROW_CLICK_THRESHOLD, v < BROW_CLICK_THRESHOLD * 0.55
+    if method == "smile":
+        if not blendshapes:
+            return False, True
+        v = 0.0
+        for b in blendshapes:
+            if b.category_name in ("mouthSmileLeft", "mouthSmileRight"):
+                v = max(v, float(b.score))
+        return v > SMILE_CLICK_THRESHOLD, v < SMILE_CLICK_OPEN_THR
+    if method == "mouth":
+        if not blendshapes:
+            return False, True
+        jaw = 0.0
+        for b in blendshapes:
+            if b.category_name == "jawOpen":
+                jaw = float(b.score); break
+        return jaw > MOUTH_CLICK_THRESHOLD, jaw < MOUTH_CLICK_OPEN_THR
+    if method == "pinch":
+        if not hands_lm_list:
+            return False, True
+        # Closed if any hand has thumb-tip & index-tip < close-threshold.
+        # Released only when ALL hands are clearly above the open-threshold.
+        any_closed = False
+        all_open = True
+        for h in hands_lm_list:
+            try:
+                d = ((float(h[4].x) - float(h[8].x)) ** 2
+                     + (float(h[4].y) - float(h[8].y)) ** 2) ** 0.5
+            except Exception:
+                continue
+            if d < PINCH_CLOSE_THRESHOLD:
+                any_closed = True
+            if d <= PINCH_OPEN_THRESHOLD:
+                all_open = False
+        return any_closed, (not any_closed) and all_open
+    return False, True
+
+
+def _update_click_hybrid(method: str, blendshapes, hands_lm_list,
+                          now: float) -> bool:
+    """Generic long-press hybrid — works for brow/smile/mouth/pinch.
+    Returns True if a CLICK should fire this frame (release of a short
+    hold). mouseDown / mouseUp for the held branch are fired internally.
+    """
+    global _click_hybrid_state, _click_active_at, _click_hybrid_method
+    global _mouth_hold_down
+    # If the user switched click methods mid-hold, release.
+    if (_click_hybrid_state == "held"
+            and _click_hybrid_method != method):
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+        _mouth_hold_down = False
+        _click_hybrid_state = "released"
+        _click_hybrid_method = ""
+
+    active, released = _gesture_active(method, blendshapes, hands_lm_list)
+    if active:
+        if _click_hybrid_state == "released":
+            _click_hybrid_state = "pending"
+            _click_active_at = now
+            _click_hybrid_method = method
+        elif _click_hybrid_state == "pending":
+            if (now - _click_active_at) >= MOUTH_HOLD_MIN_S:
+                try:
+                    pyautogui.mouseDown(_pause=False)
+                    _mouth_hold_down = True
+                    _click_hybrid_state = "held"
+                    print(f"[viewer] {method} hold "
+                          f"(>{MOUTH_HOLD_MIN_S:.2f}s) → mouseDown",
+                          flush=True)
+                except Exception as e:
+                    print(f"[viewer] mouseDown failed: {e}", flush=True)
+        return False
+    if released:
+        if _click_hybrid_state == "pending":
+            _click_hybrid_state = "released"
+            print(f"[viewer] {method} quick → click", flush=True)
+            return True
+        if _click_hybrid_state == "held":
+            try:
+                pyautogui.mouseUp(_pause=False)
+                _mouth_hold_down = False
+                print(f"[viewer] {method} release → mouseUp", flush=True)
+            except Exception as e:
+                print(f"[viewer] mouseUp failed: {e}", flush=True)
+            _click_hybrid_state = "released"
+    return False
+
+
+def _click_hybrid_force_release() -> None:
+    """Drop any held mouse from the hybrid — call on disable / master-off."""
+    global _click_hybrid_state, _mouth_hold_down
+    if _click_hybrid_state == "held":
+        try:
+            pyautogui.mouseUp(_pause=False)
+        except Exception:
+            pass
+        _mouth_hold_down = False
+    _click_hybrid_state = "released"
 
 
 def _update_mouth_hybrid(blendshapes, now: float) -> bool:
@@ -8950,32 +9068,37 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
 
     # ---- click ------------------------------------------------------------
     primary = False
-    if _click_method == "brow":
-        primary = _detect_brow_click(blendshapes, now)
-    elif _click_method == "pinch":
-        primary = _detect_pinch_click(hands_lm_list, now)
-    elif _click_method == "wink":
+    # Long-press hybrid is enabled for any "continuous" gesture
+    # (brow / smile / mouth / pinch) when _mouth_hold_enabled is on:
+    # short hold → click, long hold (≥ MOUTH_HOLD_MIN_S) → mouseDown
+    # drag, release → mouseUp. Same fluid UX across all four. Wink and
+    # blink stay edge-triggered since they're rapid signals you can't
+    # really "hold".
+    HYBRID_METHODS = ("brow", "smile", "mouth", "pinch")
+    if _click_method == "wink":
         primary = _detect_wink_click(blendshapes, now)
     elif _click_method == "right_wink":
         primary = _detect_right_wink_click(blendshapes, now)
     elif _click_method == "blink":
         primary = _detect_blink_click(blendshapes, now)
-    elif _click_method == "smile":
-        # Smile-to-click: looks natural on camera. Reuses the same detector
-        # the right-click path uses, so you can't pick smile for both.
-        primary = _detect_smile_rightclick(blendshapes, now)
-    elif _click_method == "mouth":
-        # Hybrid: short open → click, long open (>MOUTH_HOLD_MIN_S) →
-        # hold/drag, close → release. Replaces the previous either-or
-        # behavior so users can do both fluidly.
+    elif _click_method in HYBRID_METHODS:
         if _mouth_hold_enabled:
-            primary = _update_mouth_hybrid(blendshapes, now)
+            primary = _update_click_hybrid(
+                _click_method, blendshapes, hands_lm_list, now,
+            )
         else:
-            primary = _detect_mouth_click(blendshapes, now)
-    # Mouth-hold works regardless of click method when explicitly enabled
-    # — so you can use e.g. pinch for normal clicks and mouth-open for
-    # dedicated press-and-hold (no click side, just hold).
-    if _mouth_hold_enabled and _click_method != "mouth":
+            # Hybrid disabled — fall back to legacy edge-triggered click.
+            if _click_method == "brow":
+                primary = _detect_brow_click(blendshapes, now)
+            elif _click_method == "smile":
+                primary = _detect_smile_rightclick(blendshapes, now)
+            elif _click_method == "mouth":
+                primary = _detect_mouth_click(blendshapes, now)
+            else:  # pinch
+                primary = _detect_pinch_click(hands_lm_list, now)
+    # Standalone mouth-hold (when click method is something else, e.g.
+    # blink, but you still want mouth-open as a dedicated press-and-hold).
+    if _mouth_hold_enabled and _click_method not in HYBRID_METHODS:
         _update_mouth_hold(blendshapes, now)
     right = _detect_right_click(blendshapes, now)
     if right:

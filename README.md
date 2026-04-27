@@ -63,17 +63,23 @@ Pick one in Control Center → **click**:
 
 - **brow raise** — natural; works in meetings
 - **😊 smile** — hard smile to click; also natural on camera
-- **blink** / **either wink** / **right wink** — for if you have the eye control
+- **mouth open** — clear, deliberate, surprisingly comfortable
 - **pinch** — thumb + index touch
-- **mouth open (long-press hybrid)** — *short* open = single click, *hold ≥ 0.4s* = mouseDown / drag, close = mouseUp
+- **blink** / **either wink** / **right wink** — for if you have the eye control
 
-The mouth long-press is what gives you both fast clicks and fluid drag-select
-from the same gesture. Toggle via the **😮 mouth press-and-hold** experiment
-tile (default ON; turn off to make every mouth-open just a click).
+**Long-press hybrid** is on by default for **brow / smile / mouth / pinch**:
+*short hold* = single click, *hold ≥ 0.4s* = mouseDown drag, release =
+mouseUp. So a quick eyebrow flick is a click; raising and holding your brow
+is a drag. Same gesture, two outcomes — like a long-press on mobile. Wink
+and blink stay edge-triggered (you can't really "hold" them).
+
+Toggle via the **⏳ click long-press hybrid** experiment tile (default ON;
+turn off to make every gesture just a click, no drag).
 
 ### ✊ Press-and-hold options
 
-- **mouth open** (above) — long-press hybrid
+- **whatever your click method is** — the hybrid above gives you
+  press-and-hold for free on brow / smile / mouth / pinch
 - **✌️ peace** — hold a peace sign to keep mouseDown; drop it to release. Off by default.
 - **👌 OK-sign** — flash 👌 to *toggle* mouseDown on, again to release. Off by default.
 
@@ -240,7 +246,7 @@ Top bar → **experiments** row. Each tile is a toggle.
 | Tile | What | Default |
 |---|---|---|
 | **T ✋ timeout** | T-pose with both hands toggles master on/off | ON |
-| **😮 mouth press-and-hold** | mouth-open hybrid (long-press) | ON |
+| **⏳ click long-press hybrid** | brow / smile / mouth / pinch — short hold = click, long hold = drag | ON |
 | **✌️ hold-to-drag** | peace-sign mouseDown | off |
 | **👌 drag lock** | OK-sign toggles mouseDown | off |
 | **🙆 head-up copy** | chin-lift fires Cmd+C | off |
