@@ -1618,6 +1618,7 @@ VISION_HTML = r"""<!doctype html>
     ['fist',  '✊ fist'],
     ['thumbs','👍 thumbs'],
     ['ok',    '👌 OK'],
+    ['shaka', '🤙 shaka'],
     ['prayer','🙏 prayer'],
     ['atelierMode','✨ atelier'],
   ];
@@ -3147,6 +3148,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
         <button class="cc-opt" data-exp="head_copy" title="Bob your head up (chin-lift nod) to copy (Cmd+C). A native macOS toast confirms.">🙆 head-up copy</button>
         <button class="cc-opt" data-exp="thumbs_dclick" title="Thumbs up 👍 to paste (Cmd+V).">👍 paste</button>
+        <button class="cc-opt" data-exp="shaka_reload" title="🤙 Hang loose to reload the current page (Cmd+R). Default ON.">🤙 shaka reload</button>
         <button class="cc-opt" data-exp="mouth_paste" title="Open your mouth briefly to paste (Cmd+V). Auto-skipped if mouth is also your click method.">👄 mouth paste</button>
         <button class="cc-opt" data-exp="fist_zoom" title="While the fist (grab) is held, push your hand toward the camera to zoom in, pull it back to zoom out. Side-to-side still pans.">🤛 fist depth zoom</button>
         <button class="cc-opt" data-exp="atelier" title="A-pose (fingertips together, wrists wide low) toggles ✨ Atelier mode — two-hand zoom & pan for Figma">✨ atelier</button>
@@ -5476,6 +5478,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="thumbs_dclick"]');
         if (b) b.classList.toggle('on', !!msg.thumbsDclick);
       }
+      if ('shakaReload' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="shaka_reload"]');
+        if (b) b.classList.toggle('on', !!msg.shakaReload);
+      }
       if ('headCopy' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="head_copy"]');
         if (b) b.classList.toggle('on', !!msg.headCopy);
@@ -6172,6 +6178,13 @@ PUSH_COPY_RATIO: float = 1.32        # 32% bigger ⇒ "shoved at camera"
 
 # Thumbs up 👍 → paste (Cmd+V). Off by default — opt-in via experiments.
 _thumbs_dclick_enabled: bool = False
+
+# 🤙 Shaka → reload current page (Cmd+R). Default ON; gesture is rare
+# enough in everyday hand poses that false positives are unlikely.
+_shaka_reload_enabled: bool = True
+_shaka_armed: bool = True
+_shaka_last_at: float = 0.0
+SHAKA_COOLDOWN_S: float = 1.5
 
 # Head bob UP (chin-lift) → Cmd+C copy. Off by default — accidental
 # nods kept firing copies during normal conversation. Opt-in via the
@@ -8740,6 +8753,26 @@ def _is_peace_sign(hand) -> bool:
     return idx_ext and mid_ext and ring_cur and pink_cur
 
 
+def _is_shaka(hand) -> bool:
+    """🤙 shaka / hang loose: thumb + pinky extended outward, index +
+    middle + ring curled. Distinct enough from every other gesture
+    that we can edge-trigger on it without false positives."""
+    if not (_finger_curled(hand, 8, 6)
+            and _finger_curled(hand, 12, 10)
+            and _finger_curled(hand, 16, 14)
+            and _finger_extended(hand, 20, 18)):
+        return False
+    # Thumb-extended check: in shaka the thumb tip is splayed away from
+    # the index MCP joint (5). When the thumb is curled across the palm
+    # this distance is small; when it sticks out sideways it's large.
+    t = hand[4]; ref = hand[5]
+    dx = float(t.x) - float(ref.x)
+    dy = float(t.y) - float(ref.y)
+    if (dx * dx + dy * dy) ** 0.5 < 0.12:
+        return False
+    return True
+
+
 def _is_thumbs_up(hand) -> bool:
     """👍: thumb tip well above wrist, all four fingers curled."""
     thumb_tip = hand[4]
@@ -9066,8 +9099,10 @@ def _build_vision_snapshot(face_blendshapes, face_matrix, hands_lm_list,
         g["fist"]     = any(_is_fist(h) for h in hands_lm_list)
         g["thumbs"]   = any(_is_thumbs_up(h) for h in hands_lm_list)
         g["ok"]       = any(_is_ok_sign(h) for h in hands_lm_list)
+        g["shaka"]    = any(_is_shaka(h) for h in hands_lm_list)
     else:
-        g.update({"peace": False, "fist": False, "thumbs": False, "ok": False})
+        g.update({"peace": False, "fist": False, "thumbs": False,
+                  "ok": False, "shaka": False})
     g["prayer"] = bool(_prayer_active)
     g["atelierMode"] = bool(_atelier_mode)
     snap["gestures"] = g
@@ -9107,6 +9142,15 @@ def _ok_drag_force_release() -> None:
             pass
     _ok_drag_locked = False
     _ok_drag_armed = True
+
+
+def _detect_shaka_reload(hands_lm_list, now: float) -> bool:
+    if not hands_lm_list:
+        globals()['_shaka_armed'] = True
+        return False
+    match = any(_is_shaka(h) for h in hands_lm_list)
+    return _edge_trigger_gesture(match, '_shaka_armed', '_shaka_last_at',
+                                  now, cooldown=SHAKA_COOLDOWN_S)
 
 
 def _detect_thumbs_dclick(hands_lm_list, now: float) -> bool:
@@ -9490,6 +9534,17 @@ def _capture_loop() -> None:
                 _toast("handsfree", "pasted 📋")
             except Exception as e:
                 print(f"[viewer] cmd+v failed: {e}", flush=True)
+        # 🤙 Shaka → reload (Cmd+R). Hang loose, refresh.
+        if (_shaka_reload_enabled and _system_enabled
+                and _detect_shaka_reload(hands_lm_list, now)):
+            print("[viewer] 🤙 shaka → cmd+r", flush=True)
+            _push_vision_event("🤙 shaka → reload")
+            try:
+                _fire_hotkey("cmd+r")
+                _toast("handsfree", "🤙 reloaded")
+                _play_sound("Frog")     # silly little blip
+            except Exception as e:
+                print(f"[viewer] shaka reload failed: {e}", flush=True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
@@ -10469,6 +10524,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "thumbsDclick": _thumbs_dclick_enabled}).encode(),
                 )
                 return
+            if action == "shaka_reload":
+                global _shaka_reload_enabled, _shaka_armed
+                _shaka_reload_enabled = bool(data.get("on"))
+                _shaka_armed = True
+                print(f"[viewer] shaka-reload = {_shaka_reload_enabled}",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "shakaReload": _shaka_reload_enabled}).encode(),
+                )
+                return
             if action == "head_copy":
                 global _head_copy_enabled
                 _head_copy_enabled = bool(data.get("on"))
@@ -10870,6 +10937,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
+                        "shakaReload": _shaka_reload_enabled,
                         "headCopy": _head_copy_enabled,
                         "fistZoom": _fist_zoom_enabled,
                         "okDrag": _ok_drag_enabled,

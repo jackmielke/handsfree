@@ -251,6 +251,7 @@ Top bar → **experiments** row. Each tile is a toggle.
 | **👌 drag lock** | OK-sign toggles mouseDown | off |
 | **🙆 head-up copy** | chin-lift fires Cmd+C | off |
 | **👍 paste** | thumbs-up = Cmd+V | off |
+| **🤙 shaka reload** | hang loose 🤙 = Cmd+R refresh — chimes a Frog blip | ON |
 | **👄 mouth paste** | open mouth briefly = Cmd+V | off |
 | **🤛 fist depth zoom** | fist + push/pull camera = Cmd+= / Cmd+- (atelier only) | ON |
 | **✨ atelier** | A-pose → magic Figma mode | off |
