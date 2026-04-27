@@ -106,6 +106,53 @@ _voice_err: str = ""
 
 # --- voice2 engines and matching --------------------------------------
 
+def _v2_get_frontmost_app() -> str:
+    """Cached lookup of the frontmost macOS app name (lowercase).
+
+    Cheap-ish (~10ms via osascript) but we cache for 600ms so it doesn't
+    hammer System Events on every transcript. Returns "" if it can't
+    figure it out (don't want a transient blank to wipe the cache).
+    """
+    global _v2_frontmost_app, _v2_frontmost_app_at
+    now = time.time()
+    if (_v2_frontmost_app
+            and now - _v2_frontmost_app_at < V2_FRONTMOST_TTL_S):
+        return _v2_frontmost_app
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of '
+             'first process whose frontmost is true'],
+            check=False, timeout=1.0, capture_output=True, text=True,
+        )
+        name = (r.stdout or "").strip().lower()
+        if name:
+            _v2_frontmost_app = name
+            _v2_frontmost_app_at = now
+    except Exception:
+        pass
+    return _v2_frontmost_app
+
+
+def _v2_active_dict() -> dict:
+    """Merge the global dict with the contextual overlay for the
+    currently frontmost app. App entries WIN on key conflicts so a
+    per-app meaning overrides the global one."""
+    app = _v2_get_frontmost_app()
+    overlay = None
+    # Match by substring so "Arc" matches "arc helper", "Figma" matches
+    # "figma agent", etc.
+    for key, d in _v2_app_dicts.items():
+        if key in app:
+            overlay = d
+            break
+    if not overlay:
+        return _v2_dict
+    merged = dict(_v2_dict)
+    merged.update(overlay)
+    return merged
+
+
 def _v2_push_final(text: str, matched: str = "", action: str = "") -> None:
     global _v2_finals
     _v2_finals.insert(0, {
@@ -119,18 +166,19 @@ def _v2_push_final(text: str, matched: str = "", action: str = "") -> None:
 
 
 def _v2_fuzzy_match(text: str) -> tuple:
-    """Snap a transcript to the closest dictionary phrase.
-    Returns (best_phrase, ratio) or ("", 0.0)."""
+    """Snap a transcript to the closest phrase in the active dict (global
+    base + per-app overlay). Returns (best_phrase, ratio, active_dict)."""
     import difflib
     text = (text or "").lower().strip().rstrip(".,!?")
+    active = _v2_active_dict()
     if not text:
-        return "", 0.0
+        return "", 0.0, active
     # Exact wins immediately
-    if text in _v2_dict:
-        return text, 1.0
+    if text in active:
+        return text, 1.0, active
     best = ""
     best_r = 0.0
-    for phrase in _v2_dict:
+    for phrase in active:
         r = difflib.SequenceMatcher(None, text, phrase).ratio()
         # Reward containment: "open arc please" should snap to "open arc"
         if phrase in text or text in phrase:
@@ -138,11 +186,12 @@ def _v2_fuzzy_match(text: str) -> tuple:
         if r > best_r:
             best_r = r
             best = phrase
-    return best, best_r
+    return best, best_r, active
 
 
 def _v2_dispatch_action(action: str) -> None:
     """Run the action string from the dictionary value."""
+    global _v2_command_mode, _v2_command_mode_at
     try:
         if action.startswith("open_app:"):
             _open_app(action.split(":", 1)[1])
@@ -154,6 +203,11 @@ def _v2_dispatch_action(action: str) -> None:
             _click()
         elif action == "wispr_menu":
             _tap_wispr_menu_click()
+            # Wispr is now recording — auto-disarm so voice2 doesn't
+            # interpret your dictation as commands.
+            _v2_command_mode = False
+            _v2_command_mode_at = time.time()
+            _push_vision_event("🟢 auto-disarm (wispr started)")
         elif action == "voice2_off":
             _v2_stop_engine()
         elif action == "system_mute":
@@ -225,15 +279,16 @@ def _v2_handle_final(text: str) -> None:
         # Log the transcript so it shows in the feed, but don't fire.
         _v2_push_final(text, matched="", action="(standby)")
         return
-    # 3. Fuzzy-match the dictionary.
-    phrase, ratio = _v2_fuzzy_match(text)
+    # 3. Fuzzy-match against the active dict (global + frontmost-app overlay).
+    phrase, ratio, active = _v2_fuzzy_match(text)
     if phrase and ratio >= _v2_match_threshold:
-        action = _v2_dict.get(phrase, "")
+        action = active.get(phrase, "")
         _v2_last_match = phrase
         _v2_last_action = action
         _v2_last_match_at = time.time()
-        print(f"[v2] '{text}' → '{phrase}' (r={ratio:.2f}) → {action}",
-              flush=True)
+        app = _v2_get_frontmost_app() or "?"
+        print(f"[v2] '{text}' → '{phrase}' (r={ratio:.2f}, app={app}) "
+              f"→ {action}", flush=True)
         _push_vision_event(f"🎤 {phrase}")
         _v2_push_final(text, matched=phrase, action=action)
         _v2_dispatch_action(action)
@@ -587,10 +642,18 @@ def _v2_loop_vosk() -> None:
         return
     _v2_status = "opening mic"
     grammar_words = []
+    # Global dict
     for phrase in _v2_dict:
         for w in phrase.split():
             if w not in grammar_words:
                 grammar_words.append(w)
+    # Every per-app overlay's tokens — so Vosk can recognize "library"
+    # in Arc, "ellipse" in Figma, "command palette" in Cursor, etc.
+    for d in _v2_app_dicts.values():
+        for phrase in d:
+            for w in phrase.split():
+                if w not in grammar_words:
+                    grammar_words.append(w)
     # Wake-word tokens so Vosk can transcribe "hey wonder" / "bye wonder".
     for w in ("hey", "okay", "wonder", "wander", "wonderful",
               "bye", "goodbye", "later", "stop", "thanks", "see", "you",
@@ -1418,6 +1481,17 @@ VISION_HTML = r"""<!doctype html>
           </div>
         </details>
       </div>
+      <h2>🪟 active app overlay</h2>
+      <div id="v2-app" style="font-size:11px; line-height:1.6;
+           padding:10px 12px; background:#0a0a14; border-radius:6px;
+           border:1px dashed #2a2a35; margin-bottom:14px;">
+        <div style="color:var(--dim);">
+          frontmost app: <span id="v2-front-app"
+            style="color:var(--ink);">—</span>
+        </div>
+        <div id="v2-overlay-line" style="margin-top:4px;"></div>
+        <div id="v2-overlay-phrases" style="margin-top:6px;"></div>
+      </div>
       <h2>📖 command dictionary</h2>
       <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
         Voice recognizers are biased toward these phrases (Apple via
@@ -1655,6 +1729,34 @@ VISION_HTML = r"""<!doctype html>
         `<div class="feed-row"><span class="lbl"
           style="${p===cur?'color:var(--accent);font-weight:700':''}">${p}</span></div>`
       ).join('');
+    }
+    // App overlay
+    const elFront    = document.getElementById('v2-front-app');
+    const elOverline = document.getElementById('v2-overlay-line');
+    const elOvers    = document.getElementById('v2-overlay-phrases');
+    if (elFront && elOverline && elOvers) {
+      elFront.textContent = v.frontApp || '—';
+      const phrases = v.appPhrases || [];
+      if (v.appOverlay && phrases.length) {
+        elOverline.innerHTML =
+          `🪟 using <span style="color:var(--warm); font-weight:700;">` +
+          `${v.appOverlay}</span> overlay (${phrases.length} extra commands)`;
+        const cur = v.lastMatch || '';
+        elOvers.innerHTML = phrases.map(p =>
+          `<span style="display:inline-block; margin:2px 4px 2px 0;
+            padding:3px 8px; border-radius:999px;
+            background:#1a1a22; font-size:10px;
+            color:${p===cur?'var(--warm)':'var(--ink)'};
+            font-weight:${p===cur?'700':'400'};
+            border:1px solid ${p===cur?'var(--warm)':'#2a2a38'};">
+            ${p}</span>`
+        ).join('');
+      } else {
+        elOverline.innerHTML =
+          `<span style="color:var(--dim);">global commands only — ` +
+          `(no overlay for this app yet)</span>`;
+        elOvers.innerHTML = '';
+      }
     }
   }
   // Big toggle: arm/disarm command-mode (or start engine if off).
@@ -5621,6 +5723,74 @@ _v2_dict: dict = {
     "unmute":              "system_unmute",
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
+
+# Per-app contextual command overlays. When a given app is frontmost,
+# its dict is merged ON TOP of the global dict — so "new tab" can mean
+# something different in Arc vs Figma. Keys are the lowercased app
+# names returned by `tell app "System Events" to get name of …`.
+_v2_app_dicts: dict = {
+    "arc": {
+        "command bar":      "hotkey:cmd+t",      # Arc's spotlight-style bar
+        "open url":         "hotkey:cmd+l",
+        "new tab":          "hotkey:cmd+t",
+        "little arc":       "hotkey:cmd+alt+n",  # mini browser window
+        "new little arc":   "hotkey:cmd+alt+n",
+        "close tab":        "hotkey:cmd+w",
+        "reopen tab":       "hotkey:cmd+shift+t",
+        "pin tab":          "hotkey:cmd+d",
+        "library":          "hotkey:cmd+shift+l",
+        "toggle sidebar":   "hotkey:cmd+s",
+        "find in page":     "hotkey:cmd+f",
+        "next space":       "hotkey:cmd+shift+right",
+        "previous space":   "hotkey:cmd+shift+left",
+        "developer tools":  "hotkey:cmd+alt+i",
+        "incognito":        "hotkey:cmd+shift+n",
+        "private":          "hotkey:cmd+shift+n",
+        "reload":           "hotkey:cmd+r",
+        "hard reload":      "hotkey:cmd+shift+r",
+    },
+    "figma": {
+        "frame":            "hotkey:f",
+        "rectangle":        "hotkey:r",
+        "ellipse":          "hotkey:o",
+        "circle":           "hotkey:o",
+        "text":             "hotkey:t",
+        "line":             "hotkey:l",
+        "pen":              "hotkey:p",
+        "comment":          "hotkey:c",
+        "fit":              "hotkey:shift+1",
+        "fit screen":       "hotkey:shift+1",
+        "zoom to selection":"hotkey:shift+2",
+        "actual size":      "hotkey:shift+0",
+        "100 percent":      "hotkey:shift+0",
+        "group":            "hotkey:cmd+g",
+        "ungroup":          "hotkey:cmd+shift+g",
+        "duplicate":        "hotkey:cmd+d",
+    },
+    "slack": {
+        "search":           "hotkey:cmd+k",
+        "jump to":          "hotkey:cmd+k",
+        "next channel":     "hotkey:alt+down",
+        "previous channel": "hotkey:alt+up",
+        "next unread":      "hotkey:alt+shift+down",
+        "previous unread":  "hotkey:alt+shift+up",
+        "thread":           "hotkey:t",
+        "react":            "hotkey:cmd+shift+\\",
+    },
+    "cursor": {
+        "command palette":  "hotkey:cmd+shift+p",
+        "find":             "hotkey:cmd+f",
+        "find in files":    "hotkey:cmd+shift+f",
+        "go to file":       "hotkey:cmd+p",
+        "toggle sidebar":   "hotkey:cmd+b",
+        "toggle terminal":  "hotkey:cmd+`",
+        "ai chat":          "hotkey:cmd+l",
+        "comment":          "hotkey:cmd+/",
+    },
+}
+_v2_frontmost_app: str = ""           # cached frontmost app name (lowercase)
+_v2_frontmost_app_at: float = 0.0     # last cache refresh
+V2_FRONTMOST_TTL_S: float = 0.6       # refresh interval
 # Wake word toggles command mode on/off. Engine is always running so it
 # can hear the wake word; only when command_mode == True do dictionary
 # matches actually fire. Saying any of these phrases flips command_mode.
@@ -9929,6 +10099,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         snap = dict(_vision_snapshot)
                         events = list(_vision_events)
                     snap["events"] = events
+                    # Identify which app overlay is active (if any) so
+                    # the lab UI can show "you're in Arc, these extras
+                    # are available too".
+                    front_app = _v2_get_frontmost_app()
+                    overlay_key = ""
+                    overlay_phrases: list = []
+                    for k, d in _v2_app_dicts.items():
+                        if k in front_app:
+                            overlay_key = k
+                            overlay_phrases = list(d.keys())
+                            break
                     snap["voice"] = {
                         "enabled": _v2_enabled,
                         "engine":  _v2_engine,
@@ -9941,6 +10122,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "dict":    list(_v2_dict.keys()),
                         "commandMode": _v2_command_mode,
                         "wakePhrases": list(_v2_wake_phrases),
+                        "frontApp":     front_app,
+                        "appOverlay":   overlay_key,
+                        "appPhrases":   overlay_phrases,
                     }
                     try:
                         self.wfile.write(
