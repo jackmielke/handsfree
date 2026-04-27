@@ -7366,10 +7366,13 @@ def _set_master(on: bool, source: str = "") -> None:
         _cursor_calib_start = time.time()
         _finger_center = None
         _gaze_center = None
-        # Resume from timeout — unmute (only if we toggled, not on a
-        # boot-time call where state didn't change).
+        # Resume from timeout — unmute first so the wake-up sound is
+        # actually audible, then play it.
         if not was_on:
             _set_system_mute(False)
+            _play_sound("Hero")     # ascending fanfare = power-on
+            _toast("Wonder", "system on 🟢" +
+                   (f" ({source})" if source else ""))
     else:
         # Ensure any held dictation key isn't stuck after a hard off.
         _release_wispr_key_up()
@@ -7381,10 +7384,17 @@ def _set_master(on: bool, source: str = "") -> None:
         _peace_hold_force_release()
         # Release any mouse button held via 👌 drag-lock.
         _ok_drag_force_release()
-        # Timeout = silence: mute system audio so videos / music pause
-        # being audible while the user is heads-down.
+        # Timeout = silence: play the timeout sound first, THEN mute
+        # (with a small delay so the sound clears the speakers before
+        # macOS silences the output).
         if was_on:
-            _set_system_mute(True)
+            _play_sound("Funk")     # descending = power-down
+            _toast("Wonder", "timeout 🟠 — silent" +
+                   (f" ({source})" if source else ""))
+            def _delayed_mute():
+                time.sleep(0.6)
+                _set_system_mute(True)
+            threading.Thread(target=_delayed_mute, daemon=True).start()
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
