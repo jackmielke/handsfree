@@ -3197,19 +3197,51 @@ HTML = """<!doctype html>
     </div>
     <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
       <div class="cc-label" style="color:#fbbf24;">🧪 wispr test</div>
-      <div class="cc-opts" id="cc-wispr-test-opts">
+      <div class="cc-opts" id="cc-wispr-test-opts" style="flex-wrap:wrap;">
+        <div style="flex:1 1 100%; font-size:11px; color:var(--dim);
+             line-height:1.5; padding:8px 12px; background:#0a0a0f;
+             border-radius:6px; border:1px dashed #333;">
+          ⚠️ <b style="color:var(--ink);">Synthesized Fn key events
+          don't reach Wispr Flow</b> — Wispr listens at the IOKit HID
+          layer, below where apps can inject. Two paths that DO work
+          on this Mac:<br>
+          <b style="color:var(--accent);">A.</b> Bind Wispr's hotkey
+          to <b>F19</b> in its settings, then use the
+          <code>F19 single tap</code> button below — fast and
+          reliable.<br>
+          <b style="color:var(--accent);">B.</b> Use the
+          <code>menu click</code> button (AppleScript clicks the
+          status-menu icon) — slower but works regardless of Wispr
+          settings. This is the default.
+        </div>
         <button class="cc-opt" id="cc-wispr-fire"
-          title="Fire the menu-bar click NOW. Use this twice in a row to verify start → stop works without doing the prayer gesture.">
-          fire menu click
+          title="Click Wispr's menu-bar icon via AppleScript. Most reliable. Click twice to start → stop.">
+          🌟 menu click
+        </button>
+        <button class="cc-opt" id="cc-wispr-fire-double"
+          title="Click the menu-bar icon TWICE in quick succession (~250ms apart). For starting → stopping in one button press.">
+          menu click ×2
+        </button>
+        <button class="cc-opt" id="cc-wispr-f19"
+          title="Single F19 keystroke. Works only if you've bound Wispr's hotkey to F19.">
+          F19 single tap
+        </button>
+        <button class="cc-opt" id="cc-wispr-f19-double"
+          title="Double F19 keystroke (~80ms apart). Works only if you've bound Wispr to F19 with double-tap-to-toggle.">
+          F19 double tap
+        </button>
+        <button class="cc-opt" id="cc-wispr-fn-double"
+          title="Double Fn keystroke (~80ms apart). Likely WON'T reach Wispr — included for completeness.">
+          Fn double tap (probably no-op)
         </button>
         <button class="cc-opt" id="cc-wispr-probe"
-          title="Print Wispr's menu-bar layout to the result area below. Useful if the click isn't landing.">
+          title="Print Wispr's menu-bar layout. Useful if menu click is missing the icon.">
           probe menu
         </button>
         <div id="cc-wispr-result" style="font-family:ui-monospace,Menlo,monospace;
              font-size:10px; color:var(--dim); margin-left:8px;
              max-height:120px; overflow:auto; white-space:pre;
-             flex:1; min-width:200px; padding:4px 8px;
+             flex:1 1 100%; min-width:200px; padding:6px 10px;
              background:#0a0a0f; border-radius:6px; border:1px dashed #333;">
           (test results appear here)
         </div>
@@ -4325,6 +4357,54 @@ HTML = """<!doctype html>
         const j = await r.json();
         showWisprResult(j.result || 'no result');
       } catch (e) { showWisprResult('ERR ' + e.message); }
+    });
+  }
+
+  // Test buttons for the various synthetic-key trigger paths.
+  function bindWisprTestBtn(id, action, sub, label) {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const t = new Date().toLocaleTimeString();
+      showWisprResult(`[${t}] firing ${label}…`);
+      try {
+        const body = sub ? { action, sub } : { action };
+        const r = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body) });
+        const j = await r.json();
+        const out = j.result || (j.ok ? 'OK' : 'no result');
+        showWisprResult(`[${t}] ${label}: ${out}`);
+      } catch (err) {
+        showWisprResult(`[${t}] ${label} ERR: ${err.message}`);
+      }
+    });
+  }
+  bindWisprTestBtn('cc-wispr-f19',         'fn_diag', 'tap_f19',  'F19 single');
+  bindWisprTestBtn('cc-wispr-f19-double',  'fn_diag', 'double_f19', 'F19 double');
+  bindWisprTestBtn('cc-wispr-fn-double',   'fn_diag', 'double',   'Fn double');
+  // Menu click ×2 — fire twice in quick succession with a 220ms gap.
+  const dblMenuBtn = document.getElementById('cc-wispr-fire-double');
+  if (dblMenuBtn) {
+    dblMenuBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const t = new Date().toLocaleTimeString();
+      showWisprResult(`[${t}] menu click ×2 firing…`);
+      try {
+        const r1 = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'wispr_fire_menu' }) });
+        const j1 = await r1.json();
+        await new Promise(res => setTimeout(res, 220));
+        const r2 = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'wispr_fire_menu' }) });
+        const j2 = await r2.json();
+        showWisprResult(`[${t}] menu ×2:\n  1) ${j1.result}\n  2) ${j2.result}`);
+      } catch (err) {
+        showWisprResult(`[${t}] ×2 ERR: ${err.message}`);
+      }
     });
   }
 
@@ -5901,6 +5981,23 @@ _v2_dict: dict = {
     "scroll up":           "scroll:up",
     "scroll down":         "scroll:down",
     "click":               "click",
+    "enter":               "hotkey:return",
+    "press enter":         "hotkey:return",
+    "return":              "hotkey:return",
+    "next line":           "hotkey:return",
+    "submit":              "hotkey:return",
+    "tab":                 "hotkey:tab",
+    "press tab":           "hotkey:tab",
+    "next field":          "hotkey:tab",
+    "back tab":            "hotkey:shift+tab",
+    "previous field":      "hotkey:shift+tab",
+    "escape":              "hotkey:escape",
+    "press escape":        "hotkey:escape",
+    "cancel":              "hotkey:escape",
+    "space":               "hotkey:space",
+    "press space":         "hotkey:space",
+    "delete":              "hotkey:delete",
+    "backspace":           "hotkey:delete",
     "dictate":             "wispr_menu",
     "mute":                "system_mute",
     "unmute":              "system_unmute",
@@ -6827,6 +6924,7 @@ _VOICE_KEYS = {
     "8": 28, "9": 25,
     "space": 49, "enter": 36, "return": 36, "tab": 48, "esc": 53,
     "escape": 53, "up": 126, "down": 125, "left": 123, "right": 124,
+    "delete": 51, "backspace": 51, "forward_delete": 117,
     "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98,
     "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111, "f13": 105,
     "f14": 107, "f15": 113, "f16": 106, "f17": 64, "f18": 79, "f19": 80,
@@ -10483,6 +10581,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         _double_tap_cgevent(kc, fn_flag=True)
                     elif sub == "triple":
                         _triple_tap_cgevent(kc, fn_flag=True)
+                    elif sub == "tap_f19":
+                        _tap_wispr_cgevent(80, fn_flag=False)
+                    elif sub == "double_f19":
+                        _double_tap_cgevent(80, fn_flag=False)
                     elif sub == "hold_500ms":
                         threading.Thread(
                             target=_hold_cgevent_for,
