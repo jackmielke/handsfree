@@ -167,11 +167,44 @@ def _v2_dispatch_action(action: str) -> None:
 
 
 def _v2_handle_final(text: str) -> None:
-    """Called once per finalized utterance from any engine."""
+    """Called once per finalized utterance from any engine.
+
+    Two gates run before fuzzy matching:
+      1. Wake-word check — if the transcript contains "hey wonder" (or
+         a near variant), toggle command_mode and stop. The engine is
+         always listening; command_mode controls whether dictionary
+         matches actually fire actions.
+      2. Command-mode gate — if command_mode is False, log the
+         transcript but don't dispatch.
+    """
     global _v2_last_match, _v2_last_action, _v2_last_match_at
+    global _v2_command_mode, _v2_command_mode_at
     text = (text or "").strip()
     if not text:
         return
+    low = text.lower()
+    # 1. Wake-word toggles command mode.
+    for w in _v2_wake_phrases:
+        if w in low:
+            _v2_command_mode = not _v2_command_mode
+            _v2_command_mode_at = time.time()
+            label = ("🟠 commands armed" if _v2_command_mode
+                     else "🟢 standby")
+            print(f"[v2] wake → {label}  (heard: '{text}')", flush=True)
+            _push_vision_event(label)
+            _v2_push_final(text, matched=w,
+                           action=("armed" if _v2_command_mode
+                                   else "standby"))
+            _toast("Wonder",
+                   "commands armed 🟠 — go" if _v2_command_mode
+                   else "standby 🟢 — say 'hey wonder' to arm")
+            return
+    # 2. Command-mode gate.
+    if not _v2_command_mode:
+        # Log the transcript so it shows in the feed, but don't fire.
+        _v2_push_final(text, matched="", action="(standby)")
+        return
+    # 3. Fuzzy-match the dictionary.
     phrase, ratio = _v2_fuzzy_match(text)
     if phrase and ratio >= _v2_match_threshold:
         action = _v2_dict.get(phrase, "")
@@ -537,6 +570,10 @@ def _v2_loop_vosk() -> None:
         for w in phrase.split():
             if w not in grammar_words:
                 grammar_words.append(w)
+    # Wake-word tokens so Vosk can transcribe "hey wonder" itself.
+    for w in ("hey", "okay", "wonder", "wander", "wonderful"):
+        if w not in grammar_words:
+            grammar_words.append(w)
     grammar_words.append("[unk]")
     rec = vosk.KaldiRecognizer(model, SR, json.dumps(grammar_words))
     rec.SetWords(False)
@@ -1243,32 +1280,64 @@ VISION_HTML = r"""<!doctype html>
   <div style="grid-column:1/-1; display:grid;
        grid-template-columns: 1fr 1fr; gap:18px; margin-top:6px;">
     <div class="panel">
-      <h2>🎤 voice (live)</h2>
-      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+      <h2>🎤 voice</h2>
+      <!-- Big mode indicator: STANDBY (engine listening for wake word) vs
+           COMMANDS ARMED (dictionary actions fire). -->
+      <div id="v2-mode-card"
+        style="padding:14px 16px; border-radius:10px; margin-bottom:12px;
+        background:#0a1014; border:1px solid #1c1c25;
+        display:flex; gap:14px; align-items:center;">
+        <div id="v2-mode-emoji" style="font-size:28px;">🟢</div>
+        <div style="flex:1; min-width:0;">
+          <div id="v2-mode-title"
+               style="font-size:14px; letter-spacing:0.1em;
+               text-transform:uppercase; font-weight:700;
+               color:var(--accent);">standby</div>
+          <div id="v2-mode-sub"
+               style="font-size:11px; color:var(--dim);
+               margin-top:2px;">
+            say <span style="color:var(--ink); font-weight:700;">"hey wonder"</span>
+            to arm commands · or click toggle →
+          </div>
+        </div>
         <button id="v2-toggle"
-          style="padding:6px 14px; border-radius:999px;
-            border:1px solid #2a2a38; background:#15151c; color:var(--ink);
-            font-family:inherit; font-size:11px; letter-spacing:0.16em;
-            text-transform:uppercase; cursor:pointer; font-weight:700;">
-          🎤 listen
+          style="padding:8px 18px; border-radius:999px;
+            border:1px solid var(--accent); background:#0d2a1f;
+            color:var(--accent); font-family:inherit; font-size:11px;
+            letter-spacing:0.16em; text-transform:uppercase;
+            cursor:pointer; font-weight:700;">
+          arm
         </button>
+      </div>
+
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+        <span style="font-size:10px; color:var(--dim); letter-spacing:0.14em;
+          text-transform:uppercase;">engine</span>
         <select id="v2-engine"
           style="background:#0a0a14; color:var(--ink); border:1px solid #2a2a38;
             border-radius:6px; padding:5px 8px; font-family:inherit;
             font-size:11px;">
-          <option value="whisper">whisper tiny (best quality, local)</option>
-          <option value="apple">apple speech (siri-fast)</option>
-          <option value="vosk">vosk (grammar-locked, fastest)</option>
+          <option value="vosk">vosk (lightweight, default)</option>
+          <option value="whisper">whisper tiny (higher quality)</option>
+          <option value="apple">apple speech (needs Wonder.app perms)</option>
         </select>
         <span id="v2-status" style="font-size:10px; color:var(--dim);
               letter-spacing:0.18em; text-transform:uppercase;">off</span>
+        <button id="v2-engine-toggle"
+          style="padding:5px 12px; border-radius:6px;
+            border:1px solid #2a2a38; background:#15151c; color:var(--ink);
+            font-family:inherit; font-size:10px; letter-spacing:0.14em;
+            text-transform:uppercase; cursor:pointer;
+            margin-left:auto;">
+          start engine
+        </button>
       </div>
       <div id="v2-partial"
         style="min-height:42px; padding:10px 14px; border-radius:8px;
         background:#0a0a14; border:1px dashed #2a2a35; color:var(--cool);
         font-size:18px; letter-spacing:0.02em; line-height:1.4;
         font-family:inherit; word-break:break-word;">
-        — say a command —
+        — engine off — click "start engine" or say "hey wonder" —
       </div>
       <div id="v2-match"
         style="margin-top:8px; font-size:12px; color:var(--dim);">
@@ -1296,17 +1365,27 @@ VISION_HTML = r"""<!doctype html>
               cursor:pointer; font-weight:700;">
             launch Wonder.app
           </button>
-          <button id="test-mic"
-            style="padding:6px 12px; border-radius:6px;
-              border:1px solid #2a2a38; background:#15151c;
-              color:var(--ink); font-family:inherit; font-size:11px;
-              letter-spacing:0.14em; text-transform:uppercase;
-              cursor:pointer;">
-            test mic now
-          </button>
           <span id="open-wonder-status" style="font-size:10px;
                 color:var(--dim);"></span>
         </div>
+        <details style="margin-top:10px;">
+          <summary style="font-size:10px; color:var(--dim); cursor:pointer;
+                   letter-spacing:0.12em; text-transform:uppercase;">
+            mic diagnostics
+          </summary>
+          <div style="margin-top:8px;">
+            <button id="test-mic"
+              style="padding:6px 12px; border-radius:6px;
+                border:1px solid #2a2a38; background:#15151c;
+                color:var(--ink); font-family:inherit; font-size:11px;
+                letter-spacing:0.14em; text-transform:uppercase;
+                cursor:pointer;">
+              probe mic
+            </button>
+            <span id="test-mic-status" style="font-size:10px;
+                  color:var(--dim); margin-left:8px;"></span>
+          </div>
+        </details>
       </div>
       <h2>📖 command dictionary</h2>
       <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
@@ -1452,24 +1531,62 @@ VISION_HTML = r"""<!doctype html>
   }
 
   // ---- voice2 panel ----
-  const v2Toggle = document.getElementById('v2-toggle');
+  const v2Toggle = document.getElementById('v2-toggle');           // arm/disarm
+  const v2EngineToggle = document.getElementById('v2-engine-toggle'); // engine on/off
   const v2Engine = document.getElementById('v2-engine');
   const v2Status = document.getElementById('v2-status');
   const v2Partial = document.getElementById('v2-partial');
   const v2Last = document.getElementById('v2-last');
   const v2Finals = document.getElementById('v2-finals');
   const v2Dict = document.getElementById('v2-dict');
+  const v2ModeEmoji = document.getElementById('v2-mode-emoji');
+  const v2ModeTitle = document.getElementById('v2-mode-title');
+  const v2ModeSub   = document.getElementById('v2-mode-sub');
   let v2Enabled = false;
+  let v2CommandMode = false;
   function paintV2(v) {
     if (!v) return;
     v2Enabled = !!v.enabled;
-    v2Toggle.textContent = v2Enabled ? '🛑 stop' : '🎤 listen';
-    v2Toggle.style.background = v2Enabled ? '#0d2a1f' : '#15151c';
-    v2Toggle.style.borderColor = v2Enabled ? 'var(--accent)' : '#2a2a38';
-    v2Toggle.style.color = v2Enabled ? 'var(--accent)' : 'var(--ink)';
+    v2CommandMode = !!v.commandMode;
+    // ---- Big mode card: standby vs armed ----
+    if (!v2Enabled) {
+      v2ModeEmoji.textContent = '⚫';
+      v2ModeTitle.textContent = 'engine off';
+      v2ModeTitle.style.color = 'var(--dim)';
+      v2ModeSub.innerHTML = 'click "start engine" or pick an engine →';
+      v2Toggle.textContent = 'start engine';
+      v2Toggle.style.background = '#15151c';
+      v2Toggle.style.borderColor = '#2a2a38';
+      v2Toggle.style.color = 'var(--ink)';
+    } else if (v2CommandMode) {
+      v2ModeEmoji.textContent = '🟠';
+      v2ModeTitle.textContent = 'commands armed';
+      v2ModeTitle.style.color = 'var(--warm)';
+      v2ModeSub.innerHTML =
+        'speak any command from the dictionary → · ' +
+        'say "hey wonder" again to disarm';
+      v2Toggle.textContent = 'disarm';
+      v2Toggle.style.background = '#2a1a08';
+      v2Toggle.style.borderColor = 'var(--warm)';
+      v2Toggle.style.color = 'var(--warm)';
+    } else {
+      v2ModeEmoji.textContent = '🟢';
+      v2ModeTitle.textContent = 'standby';
+      v2ModeTitle.style.color = 'var(--accent)';
+      v2ModeSub.innerHTML =
+        'say <span style="color:var(--ink); font-weight:700;">"hey wonder"</span>' +
+        ' to arm commands · or click arm →';
+      v2Toggle.textContent = 'arm';
+      v2Toggle.style.background = '#0d2a1f';
+      v2Toggle.style.borderColor = 'var(--accent)';
+      v2Toggle.style.color = 'var(--accent)';
+    }
+    // ---- Engine controls ----
     if (document.activeElement !== v2Engine && v.engine) {
       v2Engine.value = v.engine;
     }
+    v2EngineToggle.textContent = v2Enabled ? 'stop engine' : 'start engine';
+    v2EngineToggle.style.color = v2Enabled ? 'var(--hot)' : 'var(--ink)';
     let s = v.status || 'off';
     if (v.err) s = 'err: ' + v.err;
     v2Status.textContent = s;
@@ -1477,7 +1594,11 @@ VISION_HTML = r"""<!doctype html>
                           : (v.status === 'err' || v.err) ? 'var(--hot)'
                           : 'var(--dim)';
     const p = v.partial || '';
-    v2Partial.textContent = p || (v2Enabled ? '— listening —' : '— say a command —');
+    v2Partial.textContent = p || (
+      !v2Enabled ? '— engine off —'
+      : v2CommandMode ? '— listening for a command —'
+      : '— listening for "hey wonder" —'
+    );
     v2Partial.style.color = p ? 'var(--ink)' : 'var(--dim)';
     v2Last.textContent = v.lastMatch
       ? (v.lastMatch + (v.lastAction ? '  →  ' + v.lastAction : ''))
@@ -1489,7 +1610,7 @@ VISION_HTML = r"""<!doctype html>
         const agoStr = ago < 1 ? 'now' : ago.toFixed(0) + 's';
         const matched = f.matched
           ? `<span style="color:var(--accent);">${f.matched}</span>`
-          : `<span style="color:var(--dim);">no match</span>`;
+          : `<span style="color:var(--dim);">${f.action || '(no match)'}</span>`;
         return `<div class="feed-row"><span class="lbl">"${f.text}"
                   → ${matched}</span>
                 <span class="ago">${agoStr}</span></div>`;
@@ -1505,25 +1626,43 @@ VISION_HTML = r"""<!doctype html>
       ).join('');
     }
   }
+  // Big toggle: arm/disarm command-mode (or start engine if off).
   v2Toggle.addEventListener('click', async (e) => {
     e.preventDefault();
-    // Immediate feedback so the button doesn't feel dead while the
-    // engine warms up. The SSE-driven paintV2() will overwrite shortly.
     if (!v2Enabled) {
+      // Engine isn't running — start it.
       v2Status.textContent = 'starting…';
       v2Status.style.color = 'var(--warm)';
-      v2Partial.textContent = '— spinning up ' + v2Engine.value + ' —';
+      try {
+        await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'v2', on: true,
+                                  engine: v2Engine.value }) });
+      } catch (err) {
+        v2Status.textContent = 'failed: ' + err.message;
+      }
+      return;
     }
+    // Engine running — toggle command mode.
     try {
-      const r = await fetch('/command', { method: 'POST',
+      await fetch('/command', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'v2_command_mode',
+                                on: !v2CommandMode }) });
+    } catch (err) {
+      v2Status.textContent = 'failed: ' + err.message;
+    }
+  });
+  // Small "start engine / stop engine" button: controls engine itself.
+  v2EngineToggle.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      await fetch('/command', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'v2', on: !v2Enabled,
                                 engine: v2Engine.value }) });
-      const j = await r.json();
-      console.log('[v2 toggle]', j);
     } catch (err) {
-      v2Status.textContent = 'request failed: ' + err.message;
-      v2Status.style.color = 'var(--hot)';
+      v2Status.textContent = 'failed: ' + err.message;
     }
   });
   const openWonder       = document.getElementById('open-wonder');
@@ -1554,27 +1693,28 @@ VISION_HTML = r"""<!doctype html>
       }
     });
   }
-  if (testMicBtn) {
+  const testMicStatus = document.getElementById('test-mic-status');
+  if (testMicBtn && testMicStatus) {
     testMicBtn.addEventListener('click', async (e) => {
       e.preventDefault();
-      openWonderStatus.textContent = 'testing mic…';
-      openWonderStatus.style.color = 'var(--warm)';
+      testMicStatus.textContent = 'testing…';
+      testMicStatus.style.color = 'var(--warm)';
       try {
         const r = await fetch('/command', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'test_mic' }) });
         const j = await r.json();
         if (j && j.ok) {
-          openWonderStatus.textContent =
-            '✓ mic OK: ' + (j.device || '?') + ' @ ' + (j.sr || '?') + 'Hz';
-          openWonderStatus.style.color = 'var(--accent)';
+          testMicStatus.textContent =
+            '✓ ' + (j.device || '?') + ' @ ' + (j.sr || '?') + 'Hz';
+          testMicStatus.style.color = 'var(--accent)';
         } else {
-          openWonderStatus.textContent = '✗ mic err: ' + (j.error || '?');
-          openWonderStatus.style.color = 'var(--hot)';
+          testMicStatus.textContent = '✗ ' + (j.error || '?');
+          testMicStatus.style.color = 'var(--hot)';
         }
       } catch (err) {
-        openWonderStatus.textContent = 'request failed: ' + err.message;
-        openWonderStatus.style.color = 'var(--hot)';
+        testMicStatus.textContent = 'failed: ' + err.message;
+        testMicStatus.style.color = 'var(--hot)';
       }
     });
   }
@@ -5381,7 +5521,7 @@ _jam_mode: bool = False
 # to the closest command in `_v2_dict` and fires its action.
 # ============================================================
 _v2_enabled: bool = False
-_v2_engine: str = "whisper"        # "apple" | "vosk" | "whisper"
+_v2_engine: str = "vosk"           # "apple" | "vosk" | "whisper"
 # Auto-pause voice2 while a Wispr/dictation gesture is active so the
 # two systems don't fight over the same mic + transcribe the same words.
 _v2_pause_during_wispr: bool = True
@@ -5427,11 +5567,18 @@ _v2_dict: dict = {
     "scroll down":         "scroll:down",
     "click":               "click",
     "dictate":             "wispr_menu",
-    "stop listening":      "voice2_off",
     "mute":                "system_mute",
     "unmute":              "system_unmute",
 }
-_v2_match_threshold: float = 0.55  # min ratio for a fuzzy match to fire
+_v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
+# Wake word toggles command mode on/off. Engine is always running so it
+# can hear the wake word; only when command_mode == True do dictionary
+# matches actually fire. Saying any of these phrases flips command_mode.
+_v2_wake_phrases: tuple = ("hey wonder", "hey wander", "okay wonder",
+                            "wonder", "hey wonderful")
+_v2_command_mode: bool = False        # commands fire only while True
+_v2_command_mode_at: float = 0.0      # last toggle timestamp
+_v2_autostart: bool = True            # start engine on daemon boot
 _v2_last_match: str = ""           # phrase last matched
 _v2_last_action: str = ""          # action label last fired
 _v2_last_match_at: float = 0.0
@@ -9125,6 +9272,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }).encode(),
                 )
                 return
+            if action == "v2_command_mode":
+                # Toggle whether dictionary commands fire actions. The
+                # engine keeps listening either way (so wake-word works).
+                global _v2_command_mode, _v2_command_mode_at
+                _v2_command_mode = bool(data.get("on"))
+                _v2_command_mode_at = time.time()
+                print(f"[v2] command mode = {_v2_command_mode} (ui)",
+                      flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "commandMode": _v2_command_mode}).encode(),
+                )
+                return
             if action == "v2_dict":
                 # Replace the dictionary with caller-supplied phrases.
                 # body: { dict: { phrase: action_str } }
@@ -9712,6 +9873,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "lastMatch": _v2_last_match,
                         "lastAction": _v2_last_action,
                         "dict":    list(_v2_dict.keys()),
+                        "commandMode": _v2_command_mode,
+                        "wakePhrases": list(_v2_wake_phrases),
                     }
                     try:
                         self.wfile.write(
@@ -9928,6 +10091,17 @@ def main() -> None:
           "bind Wispr Flow to this key for reliable prayer-hold.", flush=True)
     print(f"[viewer] serving {url} — opening in your browser", flush=True)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    # Auto-start voice2 so "hey wonder" works without the user having to
+    # click anything. Defaults to vosk (cheapest); user can switch later.
+    if _v2_autostart:
+        def _kick():
+            try:
+                _v2_start_engine(_v2_engine)
+                print(f"[viewer] auto-started voice2 ({_v2_engine})",
+                      flush=True)
+            except Exception as e:
+                print(f"[viewer] voice2 autostart failed: {e}", flush=True)
+        threading.Timer(2.0, _kick).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
