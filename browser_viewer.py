@@ -106,6 +106,52 @@ _voice_err: str = ""
 
 # --- voice2 engines and matching --------------------------------------
 
+def _v2_save_user_dict() -> None:
+    """Persist the current `_v2_dict` to disk so edits survive restarts.
+    We only save the user-added/modified entries — not the full default
+    set — so default updates keep landing on next deploy. The marker
+    is "added/edited via UI": we store everything the UI touches in
+    a separate set that we serialize here."""
+    try:
+        _V2_USER_DICT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_V2_USER_DICT_PATH, "w") as f:
+            json.dump({
+                "user_added": _v2_user_added,
+                "user_removed": list(_v2_user_removed),
+            }, f, indent=2)
+    except Exception as e:
+        print(f"[v2] save user dict failed: {e}", flush=True)
+
+
+def _v2_load_user_dict() -> None:
+    """Apply any persisted user edits to _v2_dict on startup."""
+    global _v2_user_added, _v2_user_removed
+    try:
+        if not _V2_USER_DICT_PATH.exists():
+            return
+        with open(_V2_USER_DICT_PATH) as f:
+            data = json.load(f) or {}
+        _v2_user_added = dict(data.get("user_added") or {})
+        _v2_user_removed = set(data.get("user_removed") or [])
+        for k, v in _v2_user_added.items():
+            _v2_dict[k] = v
+        for k in _v2_user_removed:
+            _v2_dict.pop(k, None)
+        n_add = len(_v2_user_added)
+        n_rem = len(_v2_user_removed)
+        if n_add or n_rem:
+            print(f"[v2] loaded user dict: +{n_add} added, -{n_rem} removed",
+                  flush=True)
+    except Exception as e:
+        print(f"[v2] load user dict failed: {e}", flush=True)
+
+
+# Tracks which entries the user has added/removed via the UI so we can
+# persist & re-apply across restarts without freezing the defaults.
+_v2_user_added: dict = {}
+_v2_user_removed: set = set()
+
+
 def _v2_get_frontmost_app() -> str:
     """Cached lookup of the frontmost macOS app name (lowercase).
 
@@ -167,24 +213,35 @@ def _v2_push_final(text: str, matched: str = "", action: str = "") -> None:
 
 def _v2_fuzzy_match(text: str) -> tuple:
     """Snap a transcript to the closest phrase in the active dict (global
-    base + per-app overlay). Returns (best_phrase, ratio, active_dict)."""
-    import difflib
+    base + per-app overlay). Returns (best_phrase, score, active_dict).
+
+    Two-tier scoring:
+      • If EVERY word of the phrase appears in the transcript → score is
+        SequenceMatcher.ratio() floored at 0.92 (high confidence).
+      • Otherwise → score is `ratio * 0.7`, so casual partial transcripts
+        like "open" alone never snap to longer phrases ("open figma",
+        "open url"). Typos still match because a near-identical string
+        gets ratio ≈ 0.95 → score ≈ 0.66, just over the 0.65 threshold.
+    """
+    import difflib, re
     text = (text or "").lower().strip().rstrip(".,!?")
     active = _v2_active_dict()
     if not text:
         return "", 0.0, active
-    # Exact wins immediately
     if text in active:
         return text, 1.0, active
+    text_words = set(re.findall(r"[a-z']+", text))
     best = ""
     best_r = 0.0
     for phrase in active:
         r = difflib.SequenceMatcher(None, text, phrase).ratio()
-        # Reward containment: "open arc please" should snap to "open arc"
-        if phrase in text or text in phrase:
-            r = max(r, 0.85)
-        if r > best_r:
-            best_r = r
+        phrase_words = set(re.findall(r"[a-z']+", phrase))
+        if phrase_words and phrase_words.issubset(text_words):
+            score = max(r, 0.92)
+        else:
+            score = r * 0.7
+        if score > best_r:
+            best_r = score
             best = phrase
     return best, best_r, active
 
@@ -195,6 +252,12 @@ def _v2_dispatch_action(action: str) -> None:
     try:
         if action.startswith("open_app:"):
             _open_app(action.split(":", 1)[1])
+        elif action.startswith("url:"):
+            url = action.split(":", 1)[1].strip()
+            try:
+                subprocess.Popen(["open", url])
+            except Exception as e:
+                print(f"[v2] open url failed: {e}", flush=True)
         elif action.startswith("hotkey:"):
             _fire_hotkey(action.split(":", 1)[1])
         elif action.startswith("scroll:"):
@@ -1494,10 +1557,31 @@ VISION_HTML = r"""<!doctype html>
       </div>
       <h2>📖 command dictionary</h2>
       <div style="font-size:10px; color:var(--dim); margin-bottom:8px;">
-        Voice recognizers are biased toward these phrases (Apple via
-        contextualStrings, Vosk via JSON grammar). Edit the file directly
-        to add more.
+        Live edits below — additions take effect immediately and persist
+        across restarts. Each command pairs a phrase you say with an
+        action: <code>hotkey:cmd+t</code>, <code>open_app:Arc</code>,
+        <code>url:https://…</code>, <code>scroll:up</code>, <code>click</code>,
+        <code>system_mute</code>, <code>system_unmute</code>,
+        <code>wispr_menu</code>.
       </div>
+      <div style="display:flex; gap:6px; margin-bottom:8px;">
+        <input id="v2-add-phrase" type="text" placeholder="phrase, e.g. open posthog"
+          style="flex:2; min-width:120px; background:#0a0a14; color:var(--ink);
+            border:1px solid #2a2a38; border-radius:6px; padding:6px 8px;
+            font-family:inherit; font-size:11px;">
+        <input id="v2-add-action" type="text" placeholder="action, e.g. url:https://app.posthog.com"
+          style="flex:3; min-width:160px; background:#0a0a14; color:var(--ink);
+            border:1px solid #2a2a38; border-radius:6px; padding:6px 8px;
+            font-family:inherit; font-size:11px;">
+        <button id="v2-add-btn"
+          style="padding:6px 12px; border-radius:6px;
+            border:1px solid var(--accent); background:#0d2a1f;
+            color:var(--accent); font-family:inherit; font-size:11px;
+            letter-spacing:0.14em; text-transform:uppercase;
+            cursor:pointer; font-weight:700;">add</button>
+      </div>
+      <div id="v2-add-status" style="font-size:10px; color:var(--dim);
+           min-height:14px; margin-bottom:6px;"></div>
       <div id="v2-dict" class="feed" style="max-height:340px;
            font-size:11px;">(loading…)</div>
     </div>
@@ -1725,10 +1809,41 @@ VISION_HTML = r"""<!doctype html>
     }
     if (v.dict && v.dict.length) {
       const cur = v.lastMatch || '';
-      v2Dict.innerHTML = v.dict.map(p =>
-        `<div class="feed-row"><span class="lbl"
-          style="${p===cur?'color:var(--accent);font-weight:700':''}">${p}</span></div>`
-      ).join('');
+      const actions = v.dictActions || {};
+      v2Dict.innerHTML = v.dict.map(p => {
+        const lit = p.replace(/"/g, '&quot;');
+        const a   = (actions[p] || '').replace(/"/g, '&quot;');
+        const isCur = p === cur;
+        return `<div class="feed-row" style="gap:8px;">
+          <span class="lbl"
+            style="flex:1; color:${isCur?'var(--accent)':'var(--ink)'};
+                   font-weight:${isCur?'700':'400'};">
+            ${p}
+            <span style="color:var(--dim); margin-left:6px;">→</span>
+            <span style="color:var(--dim); font-size:10px;">${a}</span>
+          </span>
+          <button data-del="${lit}"
+            style="background:transparent; border:1px solid #3a2030;
+                   color:#9a5060; border-radius:4px;
+                   font-size:10px; padding:2px 7px; cursor:pointer;
+                   letter-spacing:0.08em; text-transform:uppercase;">
+            del
+          </button>
+        </div>`;
+      }).join('');
+      // Bind delete buttons after rendering.
+      v2Dict.querySelectorAll('button[data-del]').forEach(b => {
+        b.addEventListener('click', async () => {
+          const phrase = b.getAttribute('data-del');
+          if (!confirm('Delete "' + phrase + '"?')) return;
+          try {
+            await fetch('/command', { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'v2_dict_remove',
+                                      phrase }) });
+          } catch (e) { console.warn('delete failed', e); }
+        });
+      });
     }
     // App overlay
     const elFront    = document.getElementById('v2-front-app');
@@ -1786,6 +1901,50 @@ VISION_HTML = r"""<!doctype html>
       v2Status.textContent = 'failed: ' + err.message;
     }
   });
+  // Dictionary editor — add a new phrase → action mapping live.
+  const addPhraseEl = document.getElementById('v2-add-phrase');
+  const addActionEl = document.getElementById('v2-add-action');
+  const addBtnEl    = document.getElementById('v2-add-btn');
+  const addStatus   = document.getElementById('v2-add-status');
+  async function submitNewCommand() {
+    const phrase = (addPhraseEl.value || '').trim().toLowerCase();
+    const action = (addActionEl.value || '').trim();
+    if (!phrase || !action) {
+      addStatus.textContent = 'fill in both phrase and action';
+      addStatus.style.color = 'var(--hot)';
+      return;
+    }
+    addStatus.textContent = 'saving…';
+    addStatus.style.color = 'var(--warm)';
+    try {
+      const r = await fetch('/command', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'v2_dict_add',
+                                phrase, value: action }) });
+      const j = await r.json();
+      if (j && j.ok) {
+        addPhraseEl.value = '';
+        addActionEl.value = '';
+        addStatus.textContent = '✓ added "' + phrase + '" → ' + action;
+        addStatus.style.color = 'var(--accent)';
+      } else {
+        addStatus.textContent = '✗ ' + (j && j.error ? j.error : 'failed');
+        addStatus.style.color = 'var(--hot)';
+      }
+    } catch (e) {
+      addStatus.textContent = '✗ ' + e.message;
+      addStatus.style.color = 'var(--hot)';
+    }
+  }
+  if (addBtnEl) {
+    addBtnEl.addEventListener('click', submitNewCommand);
+    [addPhraseEl, addActionEl].forEach(el => {
+      el.addEventListener('keydown', e => {
+        if (e.key === 'Enter') submitNewCommand();
+      });
+    });
+  }
+
   // Small "start engine / stop engine" button: controls engine itself.
   v2EngineToggle.addEventListener('click', async (e) => {
     e.preventDefault();
@@ -5724,6 +5883,11 @@ _v2_dict: dict = {
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 
+# Persisted user-dictionary additions live alongside the project so they
+# survive daemon restarts. Loaded at startup; merged into _v2_dict.
+_V2_USER_DICT_PATH = (Path.home() / "Library" / "Application Support"
+                      / "handsfree" / "user_commands.json")
+
 # Per-app contextual command overlays. When a given app is frontmost,
 # its dict is merged ON TOP of the global dict — so "new tab" can mean
 # something different in Arc vs Figma. Keys are the lowercased app
@@ -9346,6 +9510,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _right_click_method, _double_click_on, _cursor_sens
         global _scroll_gesture_enabled, _swipe_gesture_enabled
         global _scroll_sens_mult
+        global _v2_dict, _v2_user_added, _v2_user_removed
 
         # Local speech-to-text + command dispatch. Browser POSTs the raw
         # audio blob (webm/opus from MediaRecorder) here; we transcribe
@@ -9502,6 +9667,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }).encode(),
                 )
                 return
+            if action == "v2_dict_add":
+                phrase = (data.get("phrase") or "").strip().lower()
+                value  = (data.get("value")  or "").strip()
+                if not phrase or not value:
+                    self._write_status(200, "application/json",
+                        json.dumps({"ok": False,
+                            "error": "phrase and action required"}).encode())
+                    return
+                _v2_dict[phrase] = value
+                _v2_user_added[phrase] = value
+                _v2_user_removed.discard(phrase)
+                _v2_save_user_dict()
+                print(f"[v2] dict + '{phrase}' → {value}", flush=True)
+                self._write_status(200, "application/json",
+                    json.dumps({"ok": True, "phrase": phrase,
+                                "value": value}).encode())
+                return
+            if action == "v2_dict_remove":
+                phrase = (data.get("phrase") or "").strip().lower()
+                was_user_added = phrase in _v2_user_added
+                _v2_dict.pop(phrase, None)
+                _v2_user_added.pop(phrase, None)
+                # Only persist a "removed" marker if we're suppressing a
+                # default — otherwise this was a user entry the user just
+                # removed, no marker needed on next boot.
+                if not was_user_added:
+                    _v2_user_removed.add(phrase)
+                _v2_save_user_dict()
+                print(f"[v2] dict - '{phrase}' (was_user_added="
+                      f"{was_user_added})", flush=True)
+                self._write_status(200, "application/json",
+                    json.dumps({"ok": True, "phrase": phrase}).encode())
+                return
             if action == "v2_command_mode":
                 # Toggle whether dictionary commands fire actions. The
                 # engine keeps listening either way (so wake-word works).
@@ -9521,7 +9719,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # body: { dict: { phrase: action_str } }
                 d = data.get("dict")
                 if isinstance(d, dict):
-                    global _v2_dict
                     _v2_dict = {str(k).lower(): str(v) for k, v in d.items()}
                 self._write_status(
                     200, "application/json",
@@ -10120,6 +10317,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "lastMatch": _v2_last_match,
                         "lastAction": _v2_last_action,
                         "dict":    list(_v2_dict.keys()),
+                        "dictActions": dict(_v2_dict),
                         "commandMode": _v2_command_mode,
                         "wakePhrases": list(_v2_wake_phrases),
                         "frontApp":     front_app,
@@ -10331,6 +10529,7 @@ def _kill_existing_instance() -> None:
 
 def main() -> None:
     _kill_existing_instance()
+    _v2_load_user_dict()
     t = threading.Thread(target=_capture_loop, daemon=True)
     t.start()
 
