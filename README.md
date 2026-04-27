@@ -131,8 +131,8 @@ whether it heard you:
 | disarm-but-already-off | Tink | already on standby 🟠 |
 
 **Three engines, swap live** in the Vision Lab → 🎤 voice panel:
-- **vosk** — Kaldi grammar-locked. Fastest, instant partials, default. ~40 MB model.
-- **whisper** — `faster-whisper tiny.en` with VAD-segmenting. Higher quality, ~200 ms / utterance.
+- **whisper** — `faster-whisper tiny.en` with VAD-segmenting. *Default.* No fixed lexicon, so it handles brand names like "figma" / "arc" / "wispr" cleanly. ~200 ms / utterance.
+- **vosk** — Kaldi grammar-locked. Sub-100 ms partials but its small-en lexicon **doesn't include brand names** — they come back as `[unk]` and never match. Best for plain-English commands. ~40 MB model.
 - **apple speech** — on-device Apple Speech (the engine Siri uses). Highest quality but requires Speech Recognition permission via `Wonder.app`.
 
 **Auto-pause when Wispr Flow is dictating** — voice2 silently goes to

@@ -1486,8 +1486,8 @@ VISION_HTML = r"""<!doctype html>
           style="background:#0a0a14; color:var(--ink); border:1px solid #2a2a38;
             border-radius:6px; padding:5px 8px; font-family:inherit;
             font-size:11px;">
-          <option value="vosk">vosk (lightweight, default)</option>
-          <option value="whisper">whisper tiny (higher quality)</option>
+          <option value="whisper">whisper tiny (default — handles brand names)</option>
+          <option value="vosk">vosk (fastest; misses uncommon words like "figma")</option>
           <option value="apple">apple speech (needs Wonder.app perms)</option>
         </select>
         <span id="v2-status" style="font-size:10px; color:var(--dim);
@@ -5934,7 +5934,13 @@ _jam_mode: bool = False
 # to the closest command in `_v2_dict` and fires its action.
 # ============================================================
 _v2_enabled: bool = False
-_v2_engine: str = "vosk"           # "apple" | "vosk" | "whisper"
+_v2_engine: str = "whisper"        # "apple" | "vosk" | "whisper"
+                                    # default = whisper because Vosk's
+                                    # small-en lexicon doesn't include
+                                    # brand names like "figma" / "arc"
+                                    # / "wispr" — they come back as
+                                    # [unk] and never match. Whisper
+                                    # has no fixed lexicon.
 # Auto-pause voice2 while a Wispr/dictation gesture is active so the
 # two systems don't fight over the same mic + transcribe the same words.
 _v2_pause_during_wispr: bool = True
