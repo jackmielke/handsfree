@@ -6109,7 +6109,12 @@ _thumbs_last_at: float = 0.0
 # wide) toggles a Figma-focused "design canvas" mode. While active, two-
 # handed gestures map to zoom & pan: spreading hands = zoom in, squeezing
 # = zoom out, translating both hands together = pan the canvas.
-_atelier_enabled: bool = True       # feature on/off (user can disable)
+_atelier_enabled: bool = False      # off by default — A-pose can fire on
+                                    # incidental hand poses (resting hands,
+                                    # mid-conversation), and atelier mode's
+                                    # pinch-grab + fist-zoom feel like
+                                    # phantom press-and-holds. Opt in via
+                                    # the ✨ atelier tile when you want it.
 _atelier_mode: bool = False         # currently IN atelier mode
 _atelier_armed: bool = True
 _atelier_last_at: float = 0.0
@@ -6210,6 +6215,11 @@ BLINK_CLICK_OPEN_THR  = 0.3
 BLINK_CLICK_COOLDOWN_S = 0.45
 MOUTH_CLICK_THRESHOLD = 0.45
 MOUTH_CLICK_OPEN_THR  = 0.2
+# Long-press threshold: if jaw stays open longer than this, we transition
+# from "pending click" to "held / drag mode". Short opens still fire a
+# regular click. Tunable; 0.4s feels like a deliberate "hold" without
+# making fast clicks awkward.
+MOUTH_HOLD_MIN_S = 0.40
 MOUTH_CLICK_COOLDOWN_S = 0.4
 PINCH_CLOSE_THRESHOLD = 0.055   # normalized (frame coords)
 PINCH_OPEN_THRESHOLD = 0.085
@@ -7938,6 +7948,67 @@ def _detect_mouth_click(blendshapes, now: float) -> bool:
     return fired
 
 
+# Hybrid mouth detector state — replaces the older binary
+# click-vs-hold split with a long-press model:
+#   - jaw opens, we wait
+#   - if jaw closes within MOUTH_HOLD_MIN_S → fire a single click
+#   - if jaw stays open past MOUTH_HOLD_MIN_S → mouseDown (drag mode)
+#     and on close → mouseUp
+_mouth_hybrid_state: str = "closed"   # 'closed' | 'pending' | 'held'
+_mouth_open_at: float = 0.0
+
+
+def _update_mouth_hybrid(blendshapes, now: float) -> bool:
+    """Long-press mouth gesture. Returns True if a CLICK should be
+    dispatched this frame (release-of-short-open). Mouse-down/up for the
+    held branch are fired internally so the caller doesn't need to know.
+    """
+    global _mouth_hybrid_state, _mouth_open_at, _mouth_hold_down
+    if not blendshapes:
+        return False
+    jaw = 0.0
+    for b in blendshapes:
+        if b.category_name == "jawOpen":
+            jaw = float(b.score)
+            break
+    is_open = jaw > MOUTH_CLICK_THRESHOLD
+    is_clearly_closed = jaw < MOUTH_CLICK_OPEN_THR
+    # State transitions:
+    if is_open:
+        if _mouth_hybrid_state == "closed":
+            _mouth_hybrid_state = "pending"
+            _mouth_open_at = now
+        elif _mouth_hybrid_state == "pending":
+            if (now - _mouth_open_at) >= MOUTH_HOLD_MIN_S:
+                # Crossed the long-press threshold → enter hold mode.
+                try:
+                    pyautogui.mouseDown(_pause=False)
+                    _mouth_hold_down = True
+                    _mouth_hybrid_state = "held"
+                    print(f"[viewer] 👄 hold (open >{MOUTH_HOLD_MIN_S:.2f}s) "
+                          "→ mouseDown", flush=True)
+                except Exception as e:
+                    print(f"[viewer] mouseDown failed: {e}", flush=True)
+        # else 'held' — keep held
+        return False
+    if is_clearly_closed:
+        if _mouth_hybrid_state == "pending":
+            # Short open → click.
+            _mouth_hybrid_state = "closed"
+            print("[viewer] 👄 quick open → click", flush=True)
+            return True
+        if _mouth_hybrid_state == "held":
+            try:
+                pyautogui.mouseUp(_pause=False)
+                _mouth_hold_down = False
+                print("[viewer] 👄 close → mouseUp", flush=True)
+            except Exception as e:
+                print(f"[viewer] mouseUp failed: {e}", flush=True)
+            _mouth_hybrid_state = "closed"
+        # already closed: no-op
+    return False
+
+
 def _update_mouth_hold(blendshapes, now: float) -> None:
     """Mouth-open = mouseDown, mouth-close = mouseUp. Gated by
     _mouth_hold_enabled and _click_method == 'mouth'. Safe to call every frame."""
@@ -8894,13 +8965,16 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
         # the right-click path uses, so you can't pick smile for both.
         primary = _detect_smile_rightclick(blendshapes, now)
     elif _click_method == "mouth":
+        # Hybrid: short open → click, long open (>MOUTH_HOLD_MIN_S) →
+        # hold/drag, close → release. Replaces the previous either-or
+        # behavior so users can do both fluidly.
         if _mouth_hold_enabled:
-            _update_mouth_hold(blendshapes, now)
+            primary = _update_mouth_hybrid(blendshapes, now)
         else:
             primary = _detect_mouth_click(blendshapes, now)
-    # Mouth-hold works regardless of click method — so you can still
-    # use e.g. pinch or brow-raise for normal clicks, and use mouth-open
-    # as a dedicated press-and-hold.
+    # Mouth-hold works regardless of click method when explicitly enabled
+    # — so you can use e.g. pinch for normal clicks and mouth-open for
+    # dedicated press-and-hold (no click side, just hold).
     if _mouth_hold_enabled and _click_method != "mouth":
         _update_mouth_hold(blendshapes, now)
     right = _detect_right_click(blendshapes, now)
