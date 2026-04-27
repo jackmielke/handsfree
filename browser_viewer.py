@@ -1233,8 +1233,16 @@ VISION_HTML = r"""<!doctype html>
 <div class="wrap">
   <div class="head">
     <h1>🔬 vision lab</h1>
-    <div class="links">
-      what the system sees, live ·
+    <div class="links" style="display:flex; align-items:center; gap:12px;">
+      <span id="conn-pill"
+        style="font-size:10px; letter-spacing:0.18em;
+        text-transform:uppercase; font-weight:700;
+        padding:3px 10px; border-radius:999px;
+        background:#241817; color:var(--hot);
+        border:1px solid var(--hot);">
+        connecting…
+      </span>
+      <span style="color:var(--dim);">what the system sees, live</span>
       <a href="/">← back to control center</a>
       <a href="/boxing">🥊 fight</a>
     </div>
@@ -1729,10 +1737,20 @@ VISION_HTML = r"""<!doctype html>
     }
   });
 
+  const connPill = document.getElementById('conn-pill');
   function connect() {
     const es = new EventSource('/vision-stream');
     es.onmessage = (m) => {
       let d; try { d = JSON.parse(m.data); } catch (e) { return; }
+      // First message confirms server reachable + streams live; flip
+      // pill to "live" so users don't read the tab spinner as broken.
+      if (connPill && !connPill.dataset.live) {
+        connPill.dataset.live = '1';
+        connPill.textContent = '● live';
+        connPill.style.background = '#0d2a1f';
+        connPill.style.color = 'var(--accent)';
+        connPill.style.borderColor = 'var(--accent)';
+      }
       paintBlendshapes(d.blendshapes);
       paintHands(d.hands);
       paintGestures(d.gestures);
@@ -1740,7 +1758,16 @@ VISION_HTML = r"""<!doctype html>
       paintFeed(d.events);
       paintV2(d.voice);
     };
-    es.onerror = () => { es.close(); setTimeout(connect, 1500); };
+    es.onerror = () => {
+      if (connPill) {
+        connPill.textContent = 'reconnecting…';
+        connPill.style.background = '#241817';
+        connPill.style.color = 'var(--hot)';
+        connPill.style.borderColor = 'var(--hot)';
+        connPill.dataset.live = '';
+      }
+      es.close(); setTimeout(connect, 1500);
+    };
   }
   connect();
 </script>
@@ -9845,8 +9872,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/vision":
-            self._write_status(200, "text/html; charset=utf-8",
-                               VISION_HTML.encode("utf-8"))
+            body = VISION_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         if self.path == "/vision-stream":
