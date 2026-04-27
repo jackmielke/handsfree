@@ -183,23 +183,44 @@ def _v2_handle_final(text: str) -> None:
     if not text:
         return
     low = text.lower()
-    # 1. Wake-word toggles command mode.
-    for w in _v2_wake_phrases:
-        if w in low:
-            _v2_command_mode = not _v2_command_mode
+    # 1. Wake-word: distinct ARM and DISARM phrases (no toggle ambiguity).
+    matched_arm = next((w for w in _v2_arm_phrases if w in low), None)
+    matched_disarm = next((w for w in _v2_disarm_phrases if w in low), None)
+    # Disarm wins ties (e.g. "bye wonder" contains "wonder" but should
+    # disarm, not arm).
+    if matched_disarm:
+        if _v2_command_mode:
+            _v2_command_mode = False
             _v2_command_mode_at = time.time()
-            label = ("🟠 commands armed" if _v2_command_mode
-                     else "🟢 standby")
-            print(f"[v2] wake → {label}  (heard: '{text}')", flush=True)
-            _push_vision_event(label)
-            _v2_push_final(text, matched=w,
-                           action=("armed" if _v2_command_mode
-                                   else "standby"))
-            _toast("Wonder",
-                   "commands armed 🟠 — go" if _v2_command_mode
-                   else "standby 🟢 — say 'hey wonder' to arm")
-            return
-    # 2. Command-mode gate.
+            print(f"[v2] disarm via '{matched_disarm}' (heard: '{text}')",
+                  flush=True)
+            _push_vision_event("🟢 standby")
+            _v2_push_final(text, matched=matched_disarm, action="standby")
+            _toast("Wonder", "later 👋 — standby")
+        else:
+            _v2_push_final(text, matched=matched_disarm,
+                           action="(already standby)")
+        return
+    if matched_arm:
+        if not _v2_command_mode:
+            _v2_command_mode = True
+            _v2_command_mode_at = time.time()
+            print(f"[v2] arm via '{matched_arm}' (heard: '{text}')",
+                  flush=True)
+            _push_vision_event("🟠 commands armed")
+            _v2_push_final(text, matched=matched_arm, action="armed")
+            _toast("Wonder", "armed 🟠 — go")
+        else:
+            _v2_push_final(text, matched=matched_arm,
+                           action="(already armed)")
+        return
+    # 2. Auto-disarm if Wispr Flow / dictation is active. Prevents voice
+    # commands from firing on words you're dictating into another app.
+    if _prayer_active and _v2_command_mode:
+        _v2_command_mode = False
+        print(f"[v2] auto-disarm (wispr active)", flush=True)
+        _push_vision_event("🟢 auto-disarm (wispr)")
+    # 3. Command-mode gate.
     if not _v2_command_mode:
         # Log the transcript so it shows in the feed, but don't fire.
         _v2_push_final(text, matched="", action="(standby)")
@@ -570,8 +591,10 @@ def _v2_loop_vosk() -> None:
         for w in phrase.split():
             if w not in grammar_words:
                 grammar_words.append(w)
-    # Wake-word tokens so Vosk can transcribe "hey wonder" itself.
-    for w in ("hey", "okay", "wonder", "wander", "wonderful"):
+    # Wake-word tokens so Vosk can transcribe "hey wonder" / "bye wonder".
+    for w in ("hey", "okay", "wonder", "wander", "wonderful",
+              "bye", "goodbye", "later", "stop", "thanks", "see", "you",
+              "wake", "up", "by"):
         if w not in grammar_words:
             grammar_words.append(w)
     grammar_words.append("[unk]")
@@ -1572,7 +1595,7 @@ VISION_HTML = r"""<!doctype html>
       v2ModeTitle.style.color = 'var(--warm)';
       v2ModeSub.innerHTML =
         'speak any command from the dictionary → · ' +
-        'say "hey wonder" again to disarm';
+        'say <span style="color:var(--ink); font-weight:700;">"bye wonder"</span> to disarm';
       v2Toggle.textContent = 'disarm';
       v2Toggle.style.background = '#2a1a08';
       v2Toggle.style.borderColor = 'var(--warm)';
@@ -5601,8 +5624,16 @@ _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 # Wake word toggles command mode on/off. Engine is always running so it
 # can hear the wake word; only when command_mode == True do dictionary
 # matches actually fire. Saying any of these phrases flips command_mode.
-_v2_wake_phrases: tuple = ("hey wonder", "hey wander", "okay wonder",
-                            "wonder", "hey wonderful")
+# Separate arm and disarm phrases. Saying any arm phrase activates
+# command mode; any disarm phrase deactivates. Prevents the awkward
+# "I just disarmed by saying wonder, did I re-arm?" toggle ambiguity.
+_v2_arm_phrases: tuple = ("hey wonder", "okay wonder", "wake up wonder",
+                           "hey wander")
+_v2_disarm_phrases: tuple = ("bye wonder", "later wonder", "goodbye wonder",
+                              "stop wonder", "thanks wonder", "see you wonder",
+                              "by wonder")
+# Combined for grammar/contextualStrings biasing.
+_v2_wake_phrases: tuple = _v2_arm_phrases + _v2_disarm_phrases
 _v2_command_mode: bool = False        # commands fire only while True
 _v2_command_mode_at: float = 0.0      # last toggle timestamp
 _v2_autostart: bool = True            # start engine on daemon boot
@@ -5687,8 +5718,10 @@ PUSH_COPY_RATIO: float = 1.32        # 32% bigger ⇒ "shoved at camera"
 # Thumbs up 👍 → paste (Cmd+V). Off by default — opt-in via experiments.
 _thumbs_dclick_enabled: bool = False
 
-# Head bob UP (chin-lift) → Cmd+C copy.
-_head_copy_enabled: bool = True
+# Head bob UP (chin-lift) → Cmd+C copy. Off by default — accidental
+# nods kept firing copies during normal conversation. Opt-in via the
+# 🙆 head-up copy tile in the experiments bar.
+_head_copy_enabled: bool = False
 
 # Mouth-open paste — open jaw briefly to fire Cmd+V.
 # Off by default since "mouth" is also a click method; turning this on
