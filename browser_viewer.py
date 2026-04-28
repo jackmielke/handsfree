@@ -9516,58 +9516,57 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     # this hook here only for calibration state reset when master flips.
 
     # ---- calibration: capture neutral pose per method ---------------------
+    # ---- cursor calibration + pointing ----
+    # Calibration gates only the POINTING (cursor movement). Click
+    # detection runs regardless — clicks shouldn't go silent just
+    # because the user hasn't put their hand in front of the camera
+    # yet to calibrate the finger origin.
+    pointing_active = (_cursor_enabled and _cursor_calibrated
+                       and not _scroll_active)
     if _cursor_enabled and not _cursor_calibrated:
-        if _cursor_calib_start is None:
-            return ""
-        if now - _cursor_calib_start < CURSOR_CALIB_S:
-            return ""
-        ok = False
+        if (_cursor_calib_start is not None
+                and now - _cursor_calib_start >= CURSOR_CALIB_S):
+            ok = False
+            if _pointing_method == "head":
+                if face_matrix is not None:
+                    y, p = _matrix_to_yaw_pitch(face_matrix)
+                    _yaw_center, _pitch_center = y, p
+                    ok = True
+            elif _pointing_method == "finger":
+                hand = _pick_right_hand(hands_lm_list)
+                if hand is not None:
+                    _finger_center = (hand[8].x, hand[8].y)
+                    ok = True
+            elif _pointing_method == "gaze":
+                iris = _iris_center(face_landmarks)
+                if iris is not None:
+                    _gaze_center = iris
+                    ok = True
+            if ok:
+                _cursor_calibrated = True
+                pointing_active = True
+                print(f"[viewer] cursor calibrated ({_pointing_method})",
+                      flush=True)
+            else:
+                # missing data — keep trying each frame
+                _cursor_calib_start = now
+        # Either still warming up or no signal yet — fall through to
+        # click detection, just don't move the cursor.
+
+    if pointing_active:
+        target = None
         if _pointing_method == "head":
-            if face_matrix is not None:
-                y, p = _matrix_to_yaw_pitch(face_matrix)
-                _yaw_center, _pitch_center = y, p
-                ok = True
+            target = _target_from_head(face_matrix)
         elif _pointing_method == "finger":
-            hand = _pick_right_hand(hands_lm_list)
-            if hand is not None:
-                _finger_center = (hand[8].x, hand[8].y)
-                ok = True
+            target = _target_from_finger(hands_lm_list)
         elif _pointing_method == "gaze":
-            iris = _iris_center(face_landmarks)
-            if iris is not None:
-                _gaze_center = iris
-                ok = True
-        if ok:
-            _cursor_calibrated = True
-            print(f"[viewer] cursor calibrated ({_pointing_method})",
-                  flush=True)
-        else:
-            # missing data — keep trying each frame
-            _cursor_calib_start = now
-        return ""
-
-    if not _cursor_enabled or not _cursor_calibrated:
-        return ""
-
-    # ---- pointing ---------------------------------------------------------
-    # Freeze the cursor while two-hand scroll is engaged so the finger
-    # pointer doesn't chase the scrolling hand.
-    if _scroll_active:
-        return ""
-    target = None
-    if _pointing_method == "head":
-        target = _target_from_head(face_matrix)
-    elif _pointing_method == "finger":
-        target = _target_from_finger(hands_lm_list)
-    elif _pointing_method == "gaze":
-        target = _target_from_gaze(face_landmarks)
-
-    if target is not None:
-        tx = max(_virt_x0 + 2.0, min(_virt_x1 - 2.0, target[0]))
-        ty = max(_virt_y0 + 2.0, min(_virt_y1 - 2.0, target[1]))
-        _cur_x += (tx - _cur_x) * CURSOR_SMOOTHING
-        _cur_y += (ty - _cur_y) * CURSOR_SMOOTHING
-        _move_cursor_virtual(_cur_x, _cur_y)
+            target = _target_from_gaze(face_landmarks)
+        if target is not None:
+            tx = max(_virt_x0 + 2.0, min(_virt_x1 - 2.0, target[0]))
+            ty = max(_virt_y0 + 2.0, min(_virt_y1 - 2.0, target[1]))
+            _cur_x += (tx - _cur_x) * CURSOR_SMOOTHING
+            _cur_y += (ty - _cur_y) * CURSOR_SMOOTHING
+            _move_cursor_virtual(_cur_x, _cur_y)
 
     # ---- click ------------------------------------------------------------
     primary = False
