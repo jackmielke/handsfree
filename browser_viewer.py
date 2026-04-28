@@ -3248,16 +3248,24 @@ HTML = """<!doctype html>
              border-radius:6px; border:1px dashed #333;">
           ⚠️ <b style="color:var(--ink);">Synthesized Fn key events
           don't reach Wispr Flow</b> — Wispr listens at the IOKit HID
-          layer, below where apps can inject. Two paths that DO work
-          on this Mac:<br>
-          <b style="color:var(--accent);">A.</b> Bind Wispr's hotkey
-          to <b>F19</b> in its settings, then use the
-          <code>F19 single tap</code> button below — fast and
-          reliable.<br>
-          <b style="color:var(--accent);">B.</b> Use the
-          <code>menu click</code> button (AppleScript clicks the
-          status-menu icon) — slower but works regardless of Wispr
-          settings. This is the default.
+          layer, below where apps can inject.<br><br>
+          <b style="color:var(--ink);">About F19:</b> MacBook keyboards
+          only go up to F12. F13–F19 are valid macOS keycodes and
+          we <i>can</i> synthesize them — but most laptops can't
+          physically press them, which means Wispr's "press the key
+          you want to bind" UI usually can't capture F19 from your
+          keyboard. So unless you have a full external Apple keyboard
+          (or use Karabiner-Elements to remap a key to F19), <b>this
+          path won't work for you.</b><br><br>
+          What does work:<br>
+          <b style="color:var(--accent);">A. Menu click</b> — the
+          default. AppleScript clicks Wispr's status icon. No setup,
+          works regardless of Wispr's hotkey binding. ~300ms latency.<br>
+          <b style="color:var(--accent);">B. Custom hotkey combo</b> —
+          bind Wispr to any modifier combo your keyboard <i>can</i>
+          press (e.g. <code>ctrl+shift+;</code> or
+          <code>cmd+option+space</code>), then test it below. Fast like
+          F19 with no extra software needed.
         </div>
         <button class="cc-opt" id="cc-wispr-fire"
           title="Click Wispr's menu-bar icon via AppleScript. Most reliable. Click twice to start → stop.">
@@ -3279,6 +3287,20 @@ HTML = """<!doctype html>
           title="Double Fn keystroke (~80ms apart). Likely WON'T reach Wispr — included for completeness.">
           Fn double tap (probably no-op)
         </button>
+        <div style="display:flex; gap:6px; align-items:center;
+             flex:1 1 100%;">
+          <input id="cc-wispr-custom-combo" type="text"
+            placeholder="ctrl+shift+; or cmd+option+space"
+            value="ctrl+shift+;"
+            style="flex:1; min-width:160px; background:#0a0a14;
+              color:var(--ink); border:1px solid #2a2a38;
+              border-radius:6px; padding:6px 8px;
+              font-family:ui-monospace,Menlo,monospace; font-size:11px;">
+          <button class="cc-opt" id="cc-wispr-custom-fire"
+            title="Fire whatever combo you typed in the input. Bind Wispr to the same combo in its settings, then this becomes your fast-path Wispr trigger.">
+            fire custom combo
+          </button>
+        </div>
         <button class="cc-opt" id="cc-wispr-probe"
           title="Print Wispr's menu-bar layout. Useful if menu click is missing the icon.">
           probe menu
@@ -4429,6 +4451,33 @@ HTML = """<!doctype html>
   bindWisprTestBtn('cc-wispr-f19',         'fn_diag', 'tap_f19',  'F19 single');
   bindWisprTestBtn('cc-wispr-f19-double',  'fn_diag', 'double_f19', 'F19 double');
   bindWisprTestBtn('cc-wispr-fn-double',   'fn_diag', 'double',   'Fn double');
+  // Custom-hotkey fire button: read the user-typed combo and fire it.
+  const customCombo = document.getElementById('cc-wispr-custom-combo');
+  const customFire  = document.getElementById('cc-wispr-custom-fire');
+  if (customFire && customCombo) {
+    customFire.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const combo = (customCombo.value || '').trim();
+      const t = new Date().toLocaleTimeString();
+      if (!combo) {
+        showWisprResult(`[${t}] enter a combo first (e.g. ctrl+shift+;)`);
+        return;
+      }
+      showWisprResult(`[${t}] firing ${combo}…`);
+      try {
+        const r = await fetch('/command', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'fire_hotkey', combo }) });
+        const j = await r.json();
+        const out = j.ok
+          ? `OK fired ${combo}`
+          : `ERR ${j.error || 'unknown'}`;
+        showWisprResult(`[${t}] ${out}`);
+      } catch (err) {
+        showWisprResult(`[${t}] ${combo} ERR: ${err.message}`);
+      }
+    });
+  }
   // Menu click ×2 — fire twice in quick succession with a 220ms gap.
   const dblMenuBtn = document.getElementById('cc-wispr-fire-double');
   if (dblMenuBtn) {
@@ -7212,6 +7261,18 @@ _VOICE_KEYS = {
     "space": 49, "enter": 36, "return": 36, "tab": 48, "esc": 53,
     "escape": 53, "up": 126, "down": 125, "left": 123, "right": 124,
     "delete": 51, "backspace": 51, "forward_delete": 117,
+    # Punctuation — useful for "bind Wispr to ctrl+shift+;" etc.
+    ";": 41, "semicolon": 41,
+    "'": 39, "quote": 39, "apostrophe": 39,
+    ",": 43, "comma": 43,
+    ".": 47, "period": 47, "dot": 47,
+    "/": 44, "slash": 44,
+    "\\": 42, "backslash": 42,
+    "[": 33, "leftbracket": 33,
+    "]": 30, "rightbracket": 30,
+    "-": 27, "minus": 27, "dash": 27,
+    "=": 24, "equals": 24, "equal": 24,
+    "`": 50, "grave": 50, "backtick": 50,
     "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98,
     "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111, "f13": 105,
     "f14": 107, "f15": 113, "f16": 106, "f17": 64, "f18": 79, "f19": 80,
@@ -8422,14 +8483,22 @@ def _update_click_hybrid(method: str, blendshapes, hands_lm_list,
     """
     global _click_hybrid_state, _click_active_at, _click_hybrid_method
     global _mouth_hold_down
-    # If the user switched click methods mid-hold, release.
-    if (_click_hybrid_state == "held"
-            and _click_hybrid_method != method):
-        try:
-            pyautogui.mouseUp(_pause=False)
-        except Exception:
-            pass
-        _mouth_hold_down = False
+    # If the user switched click methods (any state — not just held),
+    # cleanly reset so the new method starts from a known baseline.
+    # Without this, switching smile→mouth while mid-pending could leave
+    # stale state that prevented mouth opens from registering.
+    if (_click_hybrid_method
+            and _click_hybrid_method != method
+            and _click_hybrid_state != "released"):
+        if _click_hybrid_state == "held":
+            try:
+                pyautogui.mouseUp(_pause=False)
+            except Exception:
+                pass
+            _mouth_hold_down = False
+        print(f"[viewer] hybrid method change "
+              f"{_click_hybrid_method}→{method} (state was "
+              f"{_click_hybrid_state}); resetting", flush=True)
         _click_hybrid_state = "released"
         _click_hybrid_method = ""
 
@@ -10482,6 +10551,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     200, "application/json",
                     json.dumps({"ok": True, "dict": _v2_dict}).encode(),
                 )
+                return
+            if action == "fire_hotkey":
+                # Generic "fire any keyboard combo" — used by the wispr
+                # custom-combo tester. Lets users probe whether their
+                # chosen Wispr binding is reachable via CGEvent.
+                combo = (data.get("combo") or "").strip()
+                if not combo:
+                    self._write_status(200, "application/json",
+                        json.dumps({"ok": False,
+                                    "error": "no combo"}).encode())
+                    return
+                ok = _fire_hotkey(combo)
+                self._write_status(200, "application/json",
+                    json.dumps({"ok": ok, "combo": combo,
+                                "error": (None if ok
+                                           else "_fire_hotkey returned False")
+                                }).encode())
                 return
             if action == "wispr_fire_menu":
                 # Fire the menu-bar click NOW so the user can verify the
