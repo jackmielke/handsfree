@@ -239,6 +239,16 @@ bob → drums. DJ Board lets you toggle channels, swap presets, and ride a
 master volume slider. Auto-mutes when jam mode is off — silence on the
 plain Control Center page.
 
+**🔁 Loop station** (4 slots, FIFO). While in jam mode, **hold prayer
+hands** to record whatever's playing → release to lock the recording into
+a looping track. Layer up to 4 loops; the 5th overwrites the oldest.
+Click any slot dot to mute / unmute that track. **Clear all** button drops
+every loop. Loops play through a separate bus (`loopBus`) so subsequent
+recordings don't capture them — no compounding feedback.
+
+In jam mode, prayer hands stops triggering Wispr; the server suppresses
+that path so the gesture is dedicated to the looper.
+
 ### 🥋 Other experiments
 
 Top bar → **experiments** row. Each tile is a toggle.

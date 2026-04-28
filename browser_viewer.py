@@ -2941,6 +2941,25 @@ HTML = """<!doctype html>
     line-height:1; margin-top:2px; }
   .dj-bpm-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase;
     color:var(--dim); text-align:center; }
+  /* ---- Loop Station slots (visible only in jam mode) ---- */
+  .loop-slot { aspect-ratio:1/1; border-radius:50%;
+    border:2px solid #2a2a38; background:#0a0a12;
+    display:flex; align-items:center; justify-content:center;
+    font-size:11px; color:var(--dim); cursor:pointer;
+    transition: border-color 120ms, box-shadow 120ms,
+                background 120ms, color 120ms; }
+  .loop-slot:hover { border-color:var(--cool); }
+  .loop-slot.live   { border-color:#6ee7b7; color:#6ee7b7;
+    background:#0d2018; box-shadow:0 0 12px rgba(110,231,183,0.45); }
+  .loop-slot.live.muted { border-color:#3a3a48; color:#5a5a68;
+    background:#0a0a12; box-shadow:none; }
+  .loop-slot.recording { border-color:#ff8a8a; color:#ff8a8a;
+    background:#220a14;
+    animation: loop-rec-pulse 0.7s ease-in-out infinite; }
+  @keyframes loop-rec-pulse {
+    0%, 100% { box-shadow: 0 0 4px rgba(255,138,138,0.4); }
+    50%      { box-shadow: 0 0 18px rgba(255,138,138,0.95); }
+  }
   /* Layout: camera at top, control center pinned to bottom.
      body is a flex column, so we reorder with flex `order` instead of
      moving DOM (keeps the rest of the JS untouched). */
@@ -3133,6 +3152,30 @@ HTML = """<!doctype html>
       <div>
         <div class="dj-bpm" id="dj-bpm">—</div>
         <div class="dj-bpm-label">bpm</div>
+      </div>
+    </div>
+    <div id="loop-station" class="dj-master" style="flex:0 0 220px;">
+      <div class="dj-head">
+        <span>looper</span>
+        <span class="dj-icon">🔁</span>
+      </div>
+      <div id="loop-status"
+        style="font-size:9px; letter-spacing:0.18em; text-transform:uppercase;
+               color:var(--dim); text-align:center; min-height:13px;">
+        🙏 hold prayer hands to record
+      </div>
+      <div id="loop-slots"
+        style="display:grid; grid-template-columns:repeat(4,1fr); gap:6px;
+               margin-top:6px;">
+        <!-- 4 slots, painted live -->
+      </div>
+      <div style="display:flex; gap:6px; margin-top:6px;">
+        <button id="loop-clear" title="Stop and clear all loops"
+          style="flex:1; background:#1a0a14; color:#ff8a8a;
+                 border:1px solid #5a2030; border-radius:6px;
+                 padding:4px 8px; font-size:9px; letter-spacing:0.16em;
+                 text-transform:uppercase; cursor:pointer;
+                 font-family:inherit;">clear all</button>
       </div>
     </div>
   </div>
@@ -5270,6 +5313,19 @@ HTML = """<!doctype html>
     }, masterGain);
     jamBass = new JamBass(ctx, masterGain);
     jamLead = new JamLead(ctx, masterGain);
+    // ---- Loop Station ----
+    // Tap the master output via a MediaStreamDestination so we can
+    // record what's playing into a Blob → AudioBuffer → looping source.
+    // Loops play out of `loopBus` which connects to ctx.destination but
+    // NOT to recordTap — that prevents recorded loops from being
+    // captured into subsequent recordings (i.e. compounding feedback).
+    loopBus = ctx.createGain();
+    loopBus.gain.value = 0.95;
+    loopBus.connect(ctx.destination);
+    recordTap = ctx.createMediaStreamDestination();
+    masterGain.connect(recordTap);
+    loopStation = new LoopStation(ctx, loopBus, recordTap);
+
     audioReady = true;
     // Music is gated to jam mode. Until the user clicks "jam mode", all
     // synth output is silenced — even if the page handlers call into
@@ -5278,6 +5334,205 @@ HTML = """<!doctype html>
     statusEl.textContent = 'audio ready';
     statusEl.className = 'status on';
   }
+
+  // ---- Loop Station: prayer-hands record + 4-track looper -----------
+  // While in jam mode, holding prayer hands records the master output;
+  // releasing locks the recording into a looping track. Up to 4 tracks
+  // (FIFO when full). Each loop plays out of loopBus so recordings
+  // never re-capture themselves.
+  class LoopStation {
+    constructor(ctx, loopBus, recordTap) {
+      this.ctx = ctx;
+      this.loopBus = loopBus;
+      this.recordTap = recordTap;
+      this.tracks = [null, null, null, null];   // {src, buffer, muted}
+      this.activeRecorder = null;
+      this.recordingSlot = -1;
+      this.minLoopMs = 600;                     // ignore micro-blips
+      this._fifoCursor = 0;
+      this.onChange = null;
+    }
+    isRecording() { return !!this.activeRecorder; }
+    pickSlot() {
+      // first empty wins; otherwise overwrite oldest in FIFO order
+      const empty = this.tracks.findIndex(t => !t);
+      if (empty !== -1) return empty;
+      const slot = this._fifoCursor % 4;
+      this._fifoCursor++;
+      return slot;
+    }
+    async start() {
+      if (this.activeRecorder) return;
+      const slot = this.pickSlot();
+      this.recordingSlot = slot;
+      // If overwriting a slot, stop its current source first.
+      if (this.tracks[slot] && this.tracks[slot].src) {
+        try { this.tracks[slot].src.stop(); } catch(e){}
+      }
+      this.tracks[slot] = null;
+      const stream = this.recordTap.stream;
+      const types = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+      ];
+      let mimeType = '';
+      for (const t of types) {
+        if (typeof MediaRecorder !== 'undefined'
+            && MediaRecorder.isTypeSupported(t)) { mimeType = t; break; }
+      }
+      let recorder;
+      try {
+        recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+      } catch (e) {
+        console.warn('[loop] MediaRecorder failed', e);
+        this.recordingSlot = -1;
+        return;
+      }
+      const chunks = [];
+      const startedAt = this.ctx.currentTime;
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => this._finalize(slot, chunks, startedAt);
+      recorder.start();
+      this.activeRecorder = recorder;
+      if (this.onChange) this.onChange();
+    }
+    stop() {
+      if (!this.activeRecorder) return;
+      try { this.activeRecorder.stop(); }
+      catch(e) { console.warn('[loop] stop failed', e); }
+      this.activeRecorder = null;
+    }
+    async _finalize(slot, chunks, startedAt) {
+      this.recordingSlot = -1;
+      const dur = (this.ctx.currentTime - startedAt) * 1000;
+      if (!chunks.length || dur < this.minLoopMs) {
+        if (this.onChange) this.onChange();
+        return;
+      }
+      const blob = new Blob(chunks, { type: chunks[0].type });
+      let arr, audioBuf;
+      try { arr = await blob.arrayBuffer(); }
+      catch(e) { console.warn('[loop] arrayBuffer', e); return; }
+      try { audioBuf = await this.ctx.decodeAudioData(arr); }
+      catch(e) { console.warn('[loop] decode failed', e); return; }
+      this._spawn(slot, audioBuf);
+      if (this.onChange) this.onChange();
+    }
+    _spawn(slot, buffer) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0.85;
+      src.connect(gain).connect(this.loopBus);
+      src.start();
+      this.tracks[slot] = { src, buffer, gain, muted: false };
+    }
+    toggleMute(slot) {
+      const t = this.tracks[slot];
+      if (!t) return;
+      t.muted = !t.muted;
+      t.gain.gain.value = t.muted ? 0 : 0.85;
+      if (this.onChange) this.onChange();
+    }
+    clearSlot(slot) {
+      const t = this.tracks[slot];
+      if (!t) return;
+      try { t.src.stop(); } catch(e){}
+      this.tracks[slot] = null;
+      if (this.onChange) this.onChange();
+    }
+    clearAll() {
+      this.tracks.forEach((t, i) => {
+        if (t) { try { t.src.stop(); } catch(e){} }
+        this.tracks[i] = null;
+      });
+      this._fifoCursor = 0;
+      if (this.onChange) this.onChange();
+    }
+    snapshot() {
+      return {
+        recording: !!this.activeRecorder,
+        recordingSlot: this.recordingSlot,
+        tracks: this.tracks.map(t => t
+          ? { live: true, muted: !!t.muted }
+          : { live: false }),
+      };
+    }
+  }
+  let loopBus = null, recordTap = null, loopStation = null;
+
+  // ---- Loop Station UI paint + handlers ----
+  function paintLoopStation() {
+    const wrap = document.getElementById('loop-slots');
+    const status = document.getElementById('loop-status');
+    if (!wrap) return;
+    const snap = loopStation
+      ? loopStation.snapshot()
+      : { recording: false, recordingSlot: -1,
+          tracks: [{live:false},{live:false},{live:false},{live:false}] };
+    // Render slots
+    wrap.innerHTML = '';
+    snap.tracks.forEach((t, i) => {
+      const slot = document.createElement('div');
+      slot.className = 'loop-slot';
+      slot.dataset.slot = i;
+      if (snap.recording && snap.recordingSlot === i) {
+        slot.classList.add('recording');
+        slot.textContent = '●';
+      } else if (t.live) {
+        slot.classList.add('live');
+        if (t.muted) slot.classList.add('muted');
+        slot.textContent = i + 1;
+      } else {
+        slot.textContent = '·';
+      }
+      slot.addEventListener('click', () => {
+        if (!loopStation) return;
+        const cur = loopStation.snapshot();
+        if (cur.tracks[i] && cur.tracks[i].live) {
+          loopStation.toggleMute(i);
+          paintLoopStation();
+        }
+      });
+      wrap.appendChild(slot);
+    });
+    // Status line
+    if (snap.recording) {
+      status.textContent = '● recording slot ' + (snap.recordingSlot + 1);
+      status.style.color = '#ff8a8a';
+    } else {
+      const live = snap.tracks.filter(t => t.live).length;
+      if (live > 0) {
+        status.textContent = live + ' loop' + (live === 1 ? '' : 's')
+          + ' · 🙏 to add another';
+        status.style.color = 'var(--accent)';
+      } else {
+        status.textContent = '🙏 hold prayer hands to record';
+        status.style.color = 'var(--dim)';
+      }
+    }
+  }
+  // Wire the clear-all button.
+  (function wireLoopClear() {
+    const btn = document.getElementById('loop-clear');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      if (loopStation) { loopStation.clearAll(); paintLoopStation(); }
+    });
+  })();
+  // Initial paint so the empty slots are visible.
+  paintLoopStation();
+  // Re-paint whenever the loop station changes state (record finalized,
+  // mute toggled, cleared, etc).
+  setInterval(() => {
+    if (loopStation && loopStation.onChange === null) {
+      loopStation.onChange = paintLoopStation;
+    }
+  }, 200);
 
   // Cheerful ascending chime — plays on double-clap boot.
   function bootChime() {
@@ -5404,9 +5659,18 @@ HTML = """<!doctype html>
         notesEl.focus();
         if (drums) drums.chime();
         flashBob();
+        // In jam mode, prayer = "record a loop". Server suppresses the
+        // Wispr key dispatch when jam mode is on, so we hijack here too.
+        if (jamMode && loopStation) {
+          loopStation.start();
+          paintLoopStation();
+        }
       }
       if (msg.prayerEnd) {
         listenPill.style.display = 'none';
+        if (jamMode && loopStation && loopStation.isRecording()) {
+          loopStation.stop();
+        }
       }
       if (msg.boot) {
         // Double-clap: toggle voice listening.
@@ -5974,6 +6238,10 @@ _v2_dict: dict = {
     "open calendar":       "open_app:Calendar",
     "open messages":       "open_app:Messages",
     "open whatsapp":       "open_app:WhatsApp",
+    "open whats app":      "open_app:WhatsApp",
+    "open what's app":     "open_app:WhatsApp",
+    "open whats up":       "open_app:WhatsApp",
+    "open what app":       "open_app:WhatsApp",
     "open discord":        "open_app:Discord",
     "switch tab left":     "hotkey:cmd+shift+[",
     "switch tab right":    "hotkey:cmd+shift+]",
@@ -9660,14 +9928,18 @@ def _capture_loop() -> None:
         # double-clap) were unreliable and have been removed.
         _ = hands_up_toggle  # kept for potential future use
 
-        if prayer_change is True and _system_enabled:
+        # In JAM MODE prayer-hands means "record a loop", not "trigger
+        # Wispr". The browser jam page reads the prayerStart/prayerEnd
+        # events from /events directly, so we only need to suppress
+        # the Wispr key dispatch here.
+        if prayer_change is True and _system_enabled and not _jam_mode:
             if _dict_mode == "latch":
                 print("[viewer] dict gesture → latch START tap", flush=True)
                 _tap_wispr_hotkey()
             else:
                 print("[viewer] dict gesture START → holding key", flush=True)
                 _hold_wispr_key()
-        elif prayer_change is False and _system_enabled:
+        elif prayer_change is False and _system_enabled and not _jam_mode:
             if _dict_mode == "hold":
                 print("[viewer] dict gesture END → releasing key", flush=True)
                 _release_wispr_key()
