@@ -3186,6 +3186,7 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
+        <button class="cc-opt" data-exp="auto_mute" title="When master toggles off (T-gesture, voice 'stop', hands-up), also MUTE the system audio. OFF by default — leaves Zoom/Slack call audio alone.">🔇 auto-mute on timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
@@ -5779,6 +5780,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="t_timeout"]');
         if (b) b.classList.toggle('on', !!msg.tTimeout);
       }
+      if ('autoMute' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="auto_mute"]');
+        if (b) b.classList.toggle('on', !!msg.autoMute);
+      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6471,6 +6476,12 @@ _furrow_click_armed: bool = True
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
 _t_timeout_enabled: bool = True
+# Auto-mute system audio on master timeout. Default OFF — the previous
+# default of True caused silent muting during meetings when an
+# accidental T-pose / hands-up tripped master off. Users can opt in via
+# the experiments tile if they want video/music to auto-pause on
+# timeout (e.g. for hands-free pause while distracted).
+_auto_mute_on_timeout: bool = False
 _t_gesture_armed: bool = True
 _t_last_trigger_at: float = 0.0
 T_GESTURE_COOLDOWN_S: float = 1.2
@@ -7820,10 +7831,12 @@ def _set_master(on: bool, source: str = "") -> None:
         _cursor_calib_start = time.time()
         _finger_center = None
         _gaze_center = None
-        # Resume from timeout — unmute first so the wake-up sound is
-        # actually audible, then play it.
+        # Resume from timeout — unmute first IF auto-mute is enabled,
+        # then play the wake-up sound. Default is auto-mute OFF so we
+        # never silently change the user's audio setup.
         if not was_on:
-            _set_system_mute(False)
+            if _auto_mute_on_timeout:
+                _set_system_mute(False)
             _play_sound("Hero")     # ascending fanfare = power-on
             _toast("Wonder", "system on 🟢" +
                    (f" ({source})" if source else ""))
@@ -7838,17 +7851,21 @@ def _set_master(on: bool, source: str = "") -> None:
         _peace_hold_force_release()
         # Release any mouse button held via 👌 drag-lock.
         _ok_drag_force_release()
-        # Timeout = silence: play the timeout sound first, THEN mute
-        # (with a small delay so the sound clears the speakers before
-        # macOS silences the output).
+        # Timeout audio: always play the descending Funk + show the
+        # toast, but only mute the system speakers if the user has
+        # explicitly opted into auto-mute. An accidental T-gesture
+        # during a Zoom call shouldn't silence the call audio.
         if was_on:
             _play_sound("Funk")     # descending = power-down
-            _toast("Wonder", "timeout 🟠 — silent" +
+            tag = " (silent)" if _auto_mute_on_timeout else ""
+            _toast("Wonder", f"timeout 🟠{tag}" +
                    (f" ({source})" if source else ""))
-            def _delayed_mute():
-                time.sleep(0.6)
-                _set_system_mute(True)
-            threading.Thread(target=_delayed_mute, daemon=True).start()
+            if _auto_mute_on_timeout:
+                def _delayed_mute():
+                    time.sleep(0.6)
+                    _set_system_mute(True)
+                threading.Thread(target=_delayed_mute,
+                                  daemon=True).start()
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
@@ -10854,6 +10871,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "tTimeout": _t_timeout_enabled}).encode(),
                 )
                 return
+            if action == "auto_mute":
+                global _auto_mute_on_timeout
+                _auto_mute_on_timeout = bool(data.get("on"))
+                print(f"[viewer] auto-mute on timeout = "
+                      f"{_auto_mute_on_timeout}", flush=True)
+                # If they're disabling it while currently muted, unmute.
+                if not _auto_mute_on_timeout:
+                    _set_system_mute(False)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "autoMute": _auto_mute_on_timeout}).encode(),
+                )
+                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11297,6 +11328,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "cursorSens": round(_cursor_sens, 2),
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
+                        "autoMute": _auto_mute_on_timeout,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
