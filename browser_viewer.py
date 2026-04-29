@@ -5745,11 +5745,16 @@ HTML = """<!doctype html>
       }
       if (msg.sway) {
         // 🎶 Horizontal head sway → chika (hi-hat / shaker tick).
-        // Gated by the same head-channel toggle as the kick/snare so a
-        // single DJ Board switch silences both.
-        if (drums && (!jamMode || djEnabled.head) && djChikaOn) {
+        // Always log so users can confirm the SSE event is reaching
+        // the browser even if audio is muted (e.g. masterGain=0
+        // outside jam mode, or browser tab serving stale JS).
+        try { console.log('[chika] sway received'); } catch(e) {}
+        if (drums && djChikaOn) {
           drums.chika();
         }
+        // Visual confirmation: flash the chika channel meter even
+        // outside jam mode so the user can see the detector is firing.
+        djFlashMeter('chika');
         djFlashMeter('head');
       }
       if (msg.blink && drums) drums.rim();
@@ -6746,8 +6751,9 @@ _last_bob_at = 0.0
 # nose's x-position. A "chika" maraca/hi-hat hit on each tick.
 _last_sway_at = 0.0
 _sway_dir = 0          # +1 last moved right, -1 last moved left, 0 unknown
-SWAY_DELTA_THRESHOLD = 0.012   # min lateral movement before a tick
-SWAY_COOLDOWN_S = 0.13         # max ~7 chikas/sec — busy enough for shakers
+SWAY_DELTA_THRESHOLD = 0.007   # min lateral movement before a tick
+                                # (loosened so casual head sway triggers)
+SWAY_COOLDOWN_S = 0.09         # ~11 chikas/sec max — quick shaker rolls ok
 
 _blink_armed = True
 _last_blink_at = 0.0
