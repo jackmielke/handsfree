@@ -3146,6 +3146,17 @@ HTML = """<!doctype html>
       </select>
       <div class="dj-meter"><div class="dj-meter-fill" data-k="head"></div></div>
     </div>
+    <div class="dj-chan on" data-k="chika">
+      <div class="dj-head"><span>head sway</span><span class="dj-icon">🎶</span></div>
+      <div class="dj-toggle on" data-k="chika"
+        title="Sway your head left↔right to play a hi-hat / shaker chika-chika.">
+        ON
+      </div>
+      <div style="font-size:10px; color:var(--dim);
+                  letter-spacing:0.12em; text-transform:uppercase;
+                  text-align:center;">chika ↔</div>
+      <div class="dj-meter"><div class="dj-meter-fill" data-k="chika"></div></div>
+    </div>
     <div class="dj-master">
       <div class="dj-head"><span>master</span><span class="dj-icon">🎛️</span></div>
       <input id="dj-vol" type="range" class="dj-vol" min="0" max="100" value="75">
@@ -4045,6 +4056,7 @@ HTML = """<!doctype html>
         if (k === 'right' && jamLead) jamLead.setXY(null, null);
         if (k === 'smile' && pad) pad.setAmount(0);
       }
+      if (k === 'chika') djChikaOn = djEnabled.chika;
     });
   });
   document.querySelectorAll('.dj-preset').forEach(sel => {
@@ -4884,7 +4896,9 @@ HTML = """<!doctype html>
   let masterGain = null;
 
   // DJ Board state — which channels are live when jam mode is on
-  const djEnabled = { left: true, right: true, smile: true, head: true };
+  const djEnabled = { left: true, right: true, smile: true, head: true,
+                       chika: true };
+  let djChikaOn = true;   // mirror of djEnabled.chika for SSE handler
   const djPreset  = { left: 'warm', right: 'dreamy', smile: 'warm', head: 'house' };
   // BPM tracker for head bob
   const bobTimes = [];
@@ -4977,6 +4991,33 @@ HTML = """<!doctype html>
       env.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
       n.connect(hp).connect(env).connect(this.filter);
       n.start(t); n.stop(t + 0.06);
+    }
+
+    // 🎶 Chika — closed-hi-hat / shaker tick. Played on horizontal head
+    // sway. Alternates a slightly higher and slightly lower tone so a
+    // back-and-forth rhythm sounds like "chi-ka chi-ka" rather than a
+    // monotone tick.
+    chika(velocity = 0.7) {
+      const t = this.ctx.currentTime;
+      this._chikaToggle = !this._chikaToggle;
+      const high = this._chikaToggle;
+      const n = this.ctx.createBufferSource();
+      n.buffer = this.noiseBuf;
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      // The "chi" is brighter, the "ka" has slightly more body.
+      hp.frequency.value = high ? 8400 : 6200;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = high ? 11000 : 7800;
+      bp.Q.value = high ? 1.6 : 1.1;
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.exponentialRampToValueAtTime(velocity * 0.42,
+                                             t + 0.0015);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      n.connect(hp).connect(bp).connect(env).connect(this.filter);
+      n.start(t); n.stop(t + 0.07);
     }
 
     // Rim tick — short resonant click, played on blink.
@@ -5702,6 +5743,15 @@ HTML = """<!doctype html>
         djTrackBPM();
         djFlashMeter('head');
       }
+      if (msg.sway) {
+        // 🎶 Horizontal head sway → chika (hi-hat / shaker tick).
+        // Gated by the same head-channel toggle as the kick/snare so a
+        // single DJ Board switch silences both.
+        if (drums && (!jamMode || djEnabled.head) && djChikaOn) {
+          drums.chika();
+        }
+        djFlashMeter('head');
+      }
       if (msg.blink && drums) drums.rim();
 
       if (msg.prayerStart) {
@@ -6211,6 +6261,7 @@ _state_lock = threading.Lock()
 _motion_val = 0.0   # still computed; not sent
 _smile_val = 0.0
 _bob_pending = False
+_sway_pending = False
 _blink_pending = False
 _prayer_start_pending = False
 _prayer_end_pending = False
@@ -6689,7 +6740,14 @@ GAZE_GAIN_Y = 10.0
 _prev_face_nose: Optional[tuple] = None
 _prev_hand_wrists: list = []
 _nose_y_history: Deque[float] = deque(maxlen=BOB_WINDOW_FRAMES)
+_nose_x_history: Deque[float] = deque(maxlen=BOB_WINDOW_FRAMES)
 _last_bob_at = 0.0
+# Horizontal head sway — fires once per direction-reversal of the
+# nose's x-position. A "chika" maraca/hi-hat hit on each tick.
+_last_sway_at = 0.0
+_sway_dir = 0          # +1 last moved right, -1 last moved left, 0 unknown
+SWAY_DELTA_THRESHOLD = 0.012   # min lateral movement before a tick
+SWAY_COOLDOWN_S = 0.13         # max ~7 chikas/sec — busy enough for shakers
 
 _blink_armed = True
 _last_blink_at = 0.0
@@ -6938,6 +6996,36 @@ def _detect_bob(nose_y: Optional[float], now: float) -> bool:
             and (now - _last_bob_at) > BOB_COOLDOWN_S):
         _last_bob_at = now
         return True
+    return False
+
+
+def _detect_head_sway(nose_x: Optional[float], now: float) -> bool:
+    """Fire once per direction-reversal in the nose's x position.
+    Result: a ChIKA tick on each side of a horizontal head sway, like
+    natural maraca / hi-hat playing along to a beat.
+
+    We track the most recent direction (+/-) and fire when the head
+    has clearly moved in that direction by SWAY_DELTA_THRESHOLD AND
+    the next sample reverses. Cooldown prevents micro-jitter spam.
+    """
+    global _last_sway_at, _sway_dir
+    if nose_x is None:
+        return False
+    _nose_x_history.append(nose_x)
+    if len(_nose_x_history) < 4:
+        return False
+    hist = list(_nose_x_history)
+    # Movement across the last 3 frames (filtered against jitter).
+    recent_delta = hist[-1] - hist[-3]
+    if abs(recent_delta) < SWAY_DELTA_THRESHOLD:
+        return False
+    cur_dir = 1 if recent_delta > 0 else -1
+    if (cur_dir != _sway_dir
+            and (now - _last_sway_at) > SWAY_COOLDOWN_S):
+        _last_sway_at = now
+        _sway_dir = cur_dir
+        return True
+    _sway_dir = cur_dir
     return False
 
 
@@ -9778,7 +9866,9 @@ def _capture_loop() -> None:
         except Exception as e:
             print(f"[viewer] vision snapshot err: {e}", flush=True)
         nose_y_only = face_nose[1] if face_nose is not None else None
+        nose_x_only = face_nose[0] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
+        swayed = _detect_head_sway(nose_x_only, now)
         # Head bob UP (chin lift) → Cmd+C copy + native toast.
         if (_head_copy_enabled and _system_enabled
                 and _detect_head_bob_up(nose_y_only, now)):
@@ -10039,6 +10129,8 @@ def _capture_loop() -> None:
         with _state_lock:
             if bobbed:
                 _bob_pending = True
+            if swayed:
+                _sway_pending = True
             if blinked:
                 _blink_pending = True
             if prayer_change is True:
@@ -11269,7 +11361,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while not _stop.is_set():
-                    global _bob_pending, _blink_pending
+                    global _bob_pending, _sway_pending, _blink_pending
                     global _prayer_start_pending, _prayer_end_pending
                     global _boot_pending, _swipe_pending, _dictation_pending
                     global _clap_tick_pending
@@ -11277,6 +11369,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     global _punch_pending
                     with _state_lock:
                         bob = _bob_pending
+                        sway = _sway_pending
                         blink = _blink_pending
                         prayer_start = _prayer_start_pending
                         prayer_end = _prayer_end_pending
@@ -11289,6 +11382,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         punches = list(_punch_pending)
                         _punch_pending.clear()
                         _bob_pending = False
+                        _sway_pending = False
                         _blink_pending = False
                         _prayer_start_pending = False
                         _prayer_end_pending = False
@@ -11356,6 +11450,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "voiceTranscript": list(_voice_transcript),
                     }
                     if bob: payload["bob"] = True
+                    if sway: payload["sway"] = True
                     if blink: payload["blink"] = True
                     if prayer_start: payload["prayerStart"] = True
                     if prayer_end: payload["prayerEnd"] = True
