@@ -236,7 +236,14 @@ def _v2_fuzzy_match(text: str) -> tuple:
     for phrase in active:
         r = difflib.SequenceMatcher(None, text, phrase).ratio()
         phrase_words = set(re.findall(r"[a-z']+", phrase))
-        if phrase_words and phrase_words.issubset(text_words):
+        # Single-word phrases (mute, click, copy, paste, tab, enter,
+        # delete, cancel, etc) must match EXACTLY — otherwise saying
+        # them in casual speech ("I'll mute myself", "click the link")
+        # fuzzy-fires the corresponding action. This was the root
+        # cause of unexplained system mutes during meetings.
+        if len(phrase_words) <= 1:
+            score = 1.0 if text == phrase else r * 0.5
+        elif phrase_words and phrase_words.issubset(text_words):
             score = max(r, 0.92)
         else:
             score = r * 0.7
