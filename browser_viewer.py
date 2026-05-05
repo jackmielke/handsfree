@@ -280,10 +280,6 @@ def _v2_dispatch_action(action: str) -> None:
             _push_vision_event("🟠 auto-disarm (wispr started)")
         elif action == "voice2_off":
             _v2_stop_engine()
-        elif action == "system_mute":
-            _set_system_mute(True)
-        elif action == "system_unmute":
-            _set_system_mute(False)
         else:
             print(f"[v2] unknown action {action}", flush=True)
     except Exception as e:
@@ -1580,7 +1576,6 @@ VISION_HTML = r"""<!doctype html>
         across restarts. Each command pairs a phrase you say with an
         action: <code>hotkey:cmd+t</code>, <code>open_app:Arc</code>,
         <code>url:https://…</code>, <code>scroll:up</code>, <code>click</code>,
-        <code>system_mute</code>, <code>system_unmute</code>,
         <code>wispr_menu</code>.
       </div>
       <div style="display:flex; gap:6px; margin-bottom:8px;">
@@ -3204,7 +3199,6 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
-        <button class="cc-opt" data-exp="auto_mute" title="When master toggles off (T-gesture, voice 'stop', hands-up), also MUTE the system audio. OFF by default — leaves Zoom/Slack call audio alone.">🔇 auto-mute on timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
         <button class="cc-opt" data-exp="ok_drag" title="Flash 👌 to toggle the mouse held down. Flash again to release. Lets you start a drag and walk away — no need to keep a pose up.">👌 drag lock</button>
@@ -5842,10 +5836,6 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="t_timeout"]');
         if (b) b.classList.toggle('on', !!msg.tTimeout);
       }
-      if ('autoMute' in msg) {
-        const b = document.querySelector('#cc-exp-opts [data-exp="auto_mute"]');
-        if (b) b.classList.toggle('on', !!msg.autoMute);
-      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6396,8 +6386,6 @@ _v2_dict: dict = {
     "delete":              "hotkey:delete",
     "backspace":           "hotkey:delete",
     "dictate":             "wispr_menu",
-    "mute":                "system_mute",
-    "unmute":              "system_unmute",
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 
@@ -6539,12 +6527,6 @@ _furrow_click_armed: bool = True
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
 _t_timeout_enabled: bool = True
-# Auto-mute system audio on master timeout. Default OFF — the previous
-# default of True caused silent muting during meetings when an
-# accidental T-pose / hands-up tripped master off. Users can opt in via
-# the experiments tile if they want video/music to auto-pause on
-# timeout (e.g. for hands-free pause while distracted).
-_auto_mute_on_timeout: bool = False
 _t_gesture_armed: bool = True
 _t_last_trigger_at: float = 0.0
 T_GESTURE_COOLDOWN_S: float = 1.2
@@ -7900,28 +7882,10 @@ def _release_wispr_key() -> None:
     _release_wispr_key_up()
 
 
-def _set_system_mute(mute: bool) -> None:
-    """Mute / unmute system audio output via osascript. Fired in a
-    daemon thread so the capture loop never blocks on osascript."""
-    def _go():
-        try:
-            arg = ("set volume with output muted" if mute
-                   else "set volume without output muted")
-            subprocess.run(
-                ["osascript", "-e", arg],
-                check=False, timeout=2.0,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-    threading.Thread(target=_go, daemon=True).start()
-
-
 def _set_master(on: bool, source: str = "") -> None:
     """Master on/off — drives _system_enabled and _cursor_enabled together.
     When turning on, re-calibrates cursor so head position is re-centered.
-    Auto-mutes system audio in timeout (off), unmutes on resume."""
+    Plays a power-on / power-off sound but never touches system audio."""
     global _system_enabled, _cursor_enabled, _cursor_calibrated
     global _cursor_calib_start, _finger_center, _gaze_center
     was_on = _system_enabled
@@ -7932,12 +7896,7 @@ def _set_master(on: bool, source: str = "") -> None:
         _cursor_calib_start = time.time()
         _finger_center = None
         _gaze_center = None
-        # Resume from timeout — unmute first IF auto-mute is enabled,
-        # then play the wake-up sound. Default is auto-mute OFF so we
-        # never silently change the user's audio setup.
         if not was_on:
-            if _auto_mute_on_timeout:
-                _set_system_mute(False)
             _play_sound("Hero")     # ascending fanfare = power-on
             _toast("Wonder", "system on 🟢" +
                    (f" ({source})" if source else ""))
@@ -7952,21 +7911,10 @@ def _set_master(on: bool, source: str = "") -> None:
         _peace_hold_force_release()
         # Release any mouse button held via 👌 drag-lock.
         _ok_drag_force_release()
-        # Timeout audio: always play the descending Funk + show the
-        # toast, but only mute the system speakers if the user has
-        # explicitly opted into auto-mute. An accidental T-gesture
-        # during a Zoom call shouldn't silence the call audio.
         if was_on:
             _play_sound("Funk")     # descending = power-down
-            tag = " (silent)" if _auto_mute_on_timeout else ""
-            _toast("Wonder", f"timeout 🟠{tag}" +
+            _toast("Wonder", "timeout 🟠" +
                    (f" ({source})" if source else ""))
-            if _auto_mute_on_timeout:
-                def _delayed_mute():
-                    time.sleep(0.6)
-                    _set_system_mute(True)
-                threading.Thread(target=_delayed_mute,
-                                  daemon=True).start()
     print(f"[viewer] MASTER {'ON' if on else 'OFF'}"
           + (f" ({source})" if source else ""), flush=True)
 
@@ -10289,10 +10237,7 @@ def _click() -> None:
 
 
 def _volume(direction: str) -> None:
-    if direction == "mute":
-        script = ('set volume output muted '
-                  '(not (output muted of (get volume settings)))')
-    elif direction == "up":
+    if direction == "up":
         script = ('set volume output volume '
                   '((output volume of (get volume settings)) + 10)')
     else:
@@ -10359,7 +10304,6 @@ _INSTANT = [
     (re.compile(r"\b(?:click|tap)\b", re.I),  ("click",  "")),
     (re.compile(r"\bvolume\s+up\b", re.I),    ("volume", "up")),
     (re.compile(r"\bvolume\s+down\b", re.I),  ("volume", "down")),
-    (re.compile(r"\b(?:mute|silence)\b", re.I), ("volume", "mute")),
     (re.compile(r"\bnext\s+desktop\b", re.I), ("desktop", "next")),
     (re.compile(r"\bprevious\s+desktop\b", re.I), ("desktop", "prev")),
 ]
@@ -10976,20 +10920,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "tTimeout": _t_timeout_enabled}).encode(),
                 )
                 return
-            if action == "auto_mute":
-                global _auto_mute_on_timeout
-                _auto_mute_on_timeout = bool(data.get("on"))
-                print(f"[viewer] auto-mute on timeout = "
-                      f"{_auto_mute_on_timeout}", flush=True)
-                # If they're disabling it while currently muted, unmute.
-                if not _auto_mute_on_timeout:
-                    _set_system_mute(False)
-                self._write_status(
-                    200, "application/json",
-                    json.dumps({"ok": True,
-                                "autoMute": _auto_mute_on_timeout}).encode(),
-                )
-                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11435,7 +11365,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "cursorSens": round(_cursor_sens, 2),
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
-                        "autoMute": _auto_mute_on_timeout,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
