@@ -280,6 +280,10 @@ def _v2_dispatch_action(action: str) -> None:
             _push_vision_event("🟠 auto-disarm (wispr started)")
         elif action == "voice2_off":
             _v2_stop_engine()
+        elif action == "hands_off":
+            _set_hands_disabled(True)
+        elif action == "hands_on":
+            _set_hands_disabled(False)
         else:
             print(f"[v2] unknown action {action}", flush=True)
     except Exception as e:
@@ -3198,6 +3202,7 @@ HTML = """<!doctype html>
     <div class="cc-row" style="border-bottom:1px dashed #333; padding-bottom:10px; margin-bottom:10px;">
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
+        <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
@@ -5836,6 +5841,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="t_timeout"]');
         if (b) b.classList.toggle('on', !!msg.tTimeout);
       }
+      if ('handsDisabled' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="hands_off"]');
+        if (b) b.classList.toggle('on', !!msg.handsDisabled);
+      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6386,6 +6395,12 @@ _v2_dict: dict = {
     "delete":              "hotkey:delete",
     "backspace":           "hotkey:delete",
     "dictate":             "wispr_menu",
+    "hands off":           "hands_off",
+    "ignore hands":        "hands_off",
+    "voice only":          "hands_off",
+    "hands on":            "hands_on",
+    "hands back":          "hands_on",
+    "use hands":           "hands_on",
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 
@@ -6523,6 +6538,14 @@ _last_pucker_click_at: float = 0.0
 _pucker_click_armed: bool = True
 _last_furrow_click_at: float = 0.0
 _furrow_click_armed: bool = True
+
+# 🙅 Hands-off mode. When True, hand landmarks are still detected and
+# drawn into the camera preview (so the Vision Lab still shows what
+# the system sees), but every hand-driven dispatch path treats them
+# as if no hand is present. Face / voice / face-driven scroll all keep
+# working. Useful when the user wants pure voice control without
+# accidental gesture triggers.
+_hands_disabled: bool = False
 
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
@@ -7880,6 +7903,23 @@ def _hold_wispr_key() -> None:
 
 def _release_wispr_key() -> None:
     _release_wispr_key_up()
+
+
+def _set_hands_disabled(on: bool) -> None:
+    """Toggle 🙅 hands-off mode. Releases any held mouse from hand-driven
+    gestures so a hold can't get stuck when the user disables hands."""
+    global _hands_disabled
+    _hands_disabled = bool(on)
+    if _hands_disabled:
+        # Drop any in-flight hand-held mouse so a stuck hold can't
+        # outlive the toggle.
+        _peace_hold_force_release()
+        _ok_drag_force_release()
+    label = "🙅 hands off" if _hands_disabled else "✋ hands on"
+    print(f"[viewer] {label}", flush=True)
+    _push_vision_event(label)
+    _toast("Wonder", label)
+    _play_sound("Tink" if _hands_disabled else "Pop")
 
 
 def _set_master(on: bool, source: str = "") -> None:
@@ -9819,6 +9859,7 @@ def _capture_loop() -> None:
         # Re-probe monitor layout periodically (cheap; updates only on change).
         _maybe_reprobe_virtual_bounds(now)
         # 🔬 Vision-lab snapshot — published every frame for the /vision page.
+        # Built BEFORE hands-off gate so the lab still shows detected hands.
         try:
             _vision_snapshot.clear()
             _vision_snapshot.update(_build_vision_snapshot(
@@ -9826,6 +9867,13 @@ def _capture_loop() -> None:
             ))
         except Exception as e:
             print(f"[viewer] vision snapshot err: {e}", flush=True)
+        # 🙅 Hands-off: stub the hands list AFTER snapshot, so all
+        # downstream dispatch (cursor/scroll/clicks/atelier/peace/OK/
+        # shaka/thumbs/punches/swipes/T-gesture/prayer/clap) sees an
+        # empty list and silently no-ops. Camera + face flow unaffected.
+        if _hands_disabled:
+            hands_lm_list = []
+            hand_wrists = []
         nose_y_only = face_nose[1] if face_nose is not None else None
         nose_x_only = face_nose[0] if face_nose is not None else None
         bobbed = _detect_bob(nose_y_only, now)
@@ -10920,6 +10968,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     json.dumps({"ok": True, "tTimeout": _t_timeout_enabled}).encode(),
                 )
                 return
+            if action == "hands_off":
+                _set_hands_disabled(bool(data.get("on")))
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "handsDisabled": _hands_disabled}).encode(),
+                )
+                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11365,6 +11421,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "cursorSens": round(_cursor_sens, 2),
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
+                        "handsDisabled": _hands_disabled,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
