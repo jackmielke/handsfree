@@ -6505,7 +6505,10 @@ _vision_events: list = []   # newest first; capped at 24
 VISION_EVENT_CAP: int = 24
 
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
-_pointing_method: str = "finger"  # "head" | "finger" | "gaze"
+_pointing_method: str = "head"    # "head" | "finger" | "gaze"
+                                   # head is the default so cursor works
+                                   # with hands-off ON. Tilt your head
+                                   # to move; mouth-tap to click.
 _click_method: str = "mouth"      # primary (left) click gesture
 _cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
