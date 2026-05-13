@@ -6740,7 +6740,13 @@ WINK_COOLDOWN_S       = 0.5
 BLINK_CLICK_THRESHOLD = 0.55   # both eyes closed: score on both
 BLINK_CLICK_OPEN_THR  = 0.3
 BLINK_CLICK_COOLDOWN_S = 0.45
-MOUTH_CLICK_THRESHOLD = 0.45
+MOUTH_CLICK_THRESHOLD = 0.30   # was 0.45 — most quick taps peak at
+                                # ~0.30-0.40. Higher threshold meant the
+                                # state machine never entered "pending"
+                                # on a brief tap, so no click fired
+                                # until the user held mouth open wide
+                                # enough/long enough. Closing threshold
+                                # stays low (0.20) so we keep firm hysteresis.
 MOUTH_CLICK_OPEN_THR  = 0.2
 # Long-press threshold: if jaw stays open longer than this, we transition
 # from "pending click" to "held / drag mode". Short opens still fire a
@@ -8616,6 +8622,19 @@ def _update_click_hybrid(method: str, blendshapes, hands_lm_list,
         _click_hybrid_method = ""
 
     active, released = _gesture_active(method, blendshapes, hands_lm_list)
+    # Pending-state timeout: if the gesture entered "pending" but never
+    # cleanly closed (e.g. jaw peaked then settled in the mid-zone
+    # between OPEN_THR and CLICK_THR), reset to "released" after 1.2s so
+    # the user's next deliberate click isn't accidentally promoted to a
+    # held/drag because of stale state.
+    if (_click_hybrid_state == "pending"
+            and not active and not released
+            and (now - _click_active_at) > 1.2):
+        print(f"[viewer] hybrid pending-timeout ({method}); "
+              f"resetting to released", flush=True)
+        _click_hybrid_state = "released"
+        _click_hybrid_method = ""
+
     if active:
         if _click_hybrid_state == "released":
             _click_hybrid_state = "pending"
