@@ -6505,11 +6505,7 @@ _vision_events: list = []   # newest first; capped at 24
 VISION_EVENT_CAP: int = 24
 
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
-_pointing_method: str = "head"    # "head" | "finger" | "gaze"
-                                   # head is the default so the cursor
-                                   # works even with hands-off mode on.
-_pre_hands_off_pointing: str = ""  # remembered pointing method to
-                                   # restore when hands-off toggles back
+_pointing_method: str = "finger"  # "head" | "finger" | "gaze"
 _click_method: str = "mouth"      # primary (left) click gesture
 _cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
@@ -7924,43 +7920,15 @@ def _release_wispr_key() -> None:
 
 
 def _set_hands_disabled(on: bool) -> None:
-    """Toggle 🙅 hands-off mode.
-
-    Auto-coordinates with cursor pointing: switching hands OFF while the
-    pointing method is "finger" silently swaps to "head" so the cursor
-    can still move. Original method is remembered and restored when
-    hands flip back on. Also releases any held mouse from hand-driven
-    gestures so a hold can't get stuck across the toggle.
-    """
-    global _hands_disabled, _pointing_method, _pre_hands_off_pointing
-    global _cursor_calibrated, _cursor_calib_start
+    """Toggle 🙅 hands-off mode. Releases any held mouse from hand-driven
+    gestures so a hold can't get stuck when the user disables hands."""
+    global _hands_disabled
     _hands_disabled = bool(on)
     if _hands_disabled:
         # Drop any in-flight hand-held mouse so a stuck hold can't
         # outlive the toggle.
         _peace_hold_force_release()
         _ok_drag_force_release()
-        # If the cursor is currently driven by the hand, swap to head
-        # so the user can still move + click. Remember the original
-        # so we can restore on hands-on.
-        if _pointing_method == "finger":
-            _pre_hands_off_pointing = "finger"
-            _pointing_method = "head"
-            _cursor_calibrated = False
-            _cursor_calib_start = time.time()
-            print("[viewer] hands-off: auto-swapping pointing finger→head",
-                  flush=True)
-    else:
-        # Restore the previous pointing method if we changed it on the
-        # way in.
-        if (_pre_hands_off_pointing
-                and _pointing_method == "head"):
-            _pointing_method = _pre_hands_off_pointing
-            _cursor_calibrated = False
-            _cursor_calib_start = time.time()
-            print(f"[viewer] hands-on: restored pointing "
-                  f"→{_pointing_method}", flush=True)
-            _pre_hands_off_pointing = ""
     label = "🙅 hands off" if _hands_disabled else "✋ hands on"
     print(f"[viewer] {label}", flush=True)
     _push_vision_event(label)
