@@ -9906,10 +9906,15 @@ def _capture_loop() -> None:
             ))
         except Exception as e:
             print(f"[viewer] vision snapshot err: {e}", flush=True)
-        # 🙅 Hands-off: stub the hands list AFTER snapshot, so all
-        # downstream dispatch (cursor/scroll/clicks/atelier/peace/OK/
-        # shaka/thumbs/punches/swipes/T-gesture/prayer/clap) sees an
-        # empty list and silently no-ops. Camera + face flow unaffected.
+        # 🙅 Hands-off: keep hands available for CURSOR POINTING (your
+        # hand intentionally driving the cursor isn't an "accidental
+        # trigger"), but blank them out for every gesture/action
+        # dispatch (fist scroll, peace drag, OK drag, shaka reload,
+        # thumbs paste, atelier, swipes, T-gesture, prayer, clap,
+        # pinch click, boxing, etc). The cursor branch below reads
+        # from `hands_for_cursor`; everything else uses the blanked
+        # `hands_lm_list`.
+        hands_for_cursor = list(hands_lm_list)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
@@ -10137,8 +10142,10 @@ def _capture_loop() -> None:
                     face_lms = fres.face_landmarks[0]
             except Exception:
                 face_lms = None
+        # Cursor uses the full hands list (hands-off blocks ACTIONS but
+        # not finger-pointing).
         click_event = _update_cursor(
-            face_matrix, face_lms, hands_lm_list,
+            face_matrix, face_lms, hands_for_cursor,
             face_blendshapes, now, hands_up_toggle,
         )
         if _cursor_enabled and _cursor_calibrated and _system_enabled:
