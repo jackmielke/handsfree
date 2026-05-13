@@ -6505,10 +6505,12 @@ _vision_events: list = []   # newest first; capped at 24
 VISION_EVENT_CAP: int = 24
 
 # Cursor prototyping: pointing method + click method, hot-swappable from UI.
-_pointing_method: str = "head"    # "head" | "finger" | "gaze"
-                                   # head is the default so cursor works
-                                   # with hands-off ON. Tilt your head
-                                   # to move; mouth-tap to click.
+_pointing_method: str = "finger"  # "head" | "finger" | "gaze"
+                                   # Default only matters when the user
+                                   # disables hands-off — by default
+                                   # hands-off is ON and the daemon
+                                   # never moves the cursor (physical
+                                   # mouse / trackpad does it).
 _click_method: str = "mouth"      # primary (left) click gesture
 _cursor_sens: float = 1.5         # multiplier on all pointing-method gains
 _right_click_method: str = "off"  # "smile" | "pucker" | "furrow" | "off"
@@ -9657,8 +9659,13 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     # detection runs regardless — clicks shouldn't go silent just
     # because the user hasn't put their hand in front of the camera
     # yet to calibrate the finger origin.
+    #
+    # In hands-off mode the daemon DOES NOT move the cursor at all —
+    # the user's physical mouse / trackpad controls position freely
+    # and mouth-clicks fire wherever the OS cursor currently is.
     pointing_active = (_cursor_enabled and _cursor_calibrated
-                       and not _scroll_active)
+                       and not _scroll_active
+                       and not _hands_disabled)
     if _cursor_enabled and not _cursor_calibrated:
         if (_cursor_calib_start is not None
                 and now - _cursor_calib_start >= CURSOR_CALIB_S):
