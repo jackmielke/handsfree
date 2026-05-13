@@ -6539,6 +6539,13 @@ _pucker_click_armed: bool = True
 _last_furrow_click_at: float = 0.0
 _furrow_click_armed: bool = True
 
+# Effective capture FPS. Updated each frame in _capture_loop.
+# Low value (< 8) during the first ~30s after restart means MediaPipe
+# / whisper are still warming up and brief mouth-opens may be missed
+# between frames — the click long-press feels sticky during this
+# window. Surfaced in the SSE state so the UI can show a warmup pill.
+_capture_fps: float = 0.0
+
 # 🙅 Hands-off mode. When True, hand landmarks are still detected and
 # drawn into the camera preview (so the Vision Lab still shows what
 # the system sees), but every hand-driven dispatch path treats them
@@ -9786,12 +9793,24 @@ def _capture_loop() -> None:
     TARGET_FPS = 15
     FRAME_DT = 1.0 / TARGET_FPS
     next_frame_at = time.time()
+    # Track effective FPS with a sliding average so we can surface
+    # "warmed up?" state in the UI. Frames-per-second is the inverse
+    # of average inter-frame interval over the last ~30 frames.
+    _frame_intervals: Deque = deque(maxlen=30)
+    _last_frame_at = time.time()
     while not _stop.is_set():
         # Throttle to TARGET_FPS.
         now_throttle = time.time()
         if now_throttle < next_frame_at:
             time.sleep(next_frame_at - now_throttle)
         next_frame_at = time.time() + FRAME_DT
+        # Effective FPS tracker (post-throttle, pre-work).
+        loop_now = time.time()
+        _frame_intervals.append(loop_now - _last_frame_at)
+        _last_frame_at = loop_now
+        if _frame_intervals:
+            avg = sum(_frame_intervals) / len(_frame_intervals)
+            globals()['_capture_fps'] = round(1.0 / avg, 1) if avg > 0 else 0.0
 
         ok, frame = cam.read()
         if not ok:
@@ -11422,6 +11441,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
                         "handsDisabled": _hands_disabled,
+                        "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
                         "thumbsDclick": _thumbs_dclick_enabled,
@@ -11526,8 +11546,11 @@ def main() -> None:
           "bind Wispr Flow to this key for reliable prayer-hold.", flush=True)
     print(f"[viewer] serving {url} — opening in your browser", flush=True)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
-    # Auto-start voice2 so "hey wonder" works without the user having to
-    # click anything. Defaults to vosk (cheapest); user can switch later.
+    # Auto-start voice2. Delay 15s so MediaPipe + camera get clean CPU
+    # during warmup — otherwise loading the whisper-tiny.en model on a
+    # cold daemon competes with the capture loop and drops effective
+    # FPS to 3-5, which makes quick mouth-clicks get dropped between
+    # frames for the first ~30s after restart.
     if _v2_autostart:
         def _kick():
             try:
@@ -11536,7 +11559,7 @@ def main() -> None:
                       flush=True)
             except Exception as e:
                 print(f"[viewer] voice2 autostart failed: {e}", flush=True)
-        threading.Timer(2.0, _kick).start()
+        threading.Timer(15.0, _kick).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
