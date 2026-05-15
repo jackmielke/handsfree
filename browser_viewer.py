@@ -6746,14 +6746,15 @@ WINK_COOLDOWN_S       = 0.5
 BLINK_CLICK_THRESHOLD = 0.55   # both eyes closed: score on both
 BLINK_CLICK_OPEN_THR  = 0.3
 BLINK_CLICK_COOLDOWN_S = 0.45
-MOUTH_CLICK_THRESHOLD = 0.30   # was 0.45 — most quick taps peak at
-                                # ~0.30-0.40. Higher threshold meant the
-                                # state machine never entered "pending"
-                                # on a brief tap, so no click fired
-                                # until the user held mouth open wide
-                                # enough/long enough. Closing threshold
-                                # stays low (0.20) so we keep firm hysteresis.
-MOUTH_CLICK_OPEN_THR  = 0.2
+MOUTH_CLICK_THRESHOLD = 0.42   # 0.30 was triggering on chewing/talking;
+                                # 0.45 (the original) only registered
+                                # very wide opens. 0.42 catches a
+                                # deliberate tap without firing on
+                                # casual mouth movement.
+MOUTH_CLICK_OPEN_THR  = 0.25   # was 0.2; nudged up to widen the
+                                # hysteresis gap (0.42 - 0.25 = 0.17)
+                                # so half-open chewing can't oscillate
+                                # across both thresholds.
 # Long-press threshold: if jaw stays open longer than this, we transition
 # from "pending click" to "held / drag mode". Short opens still fire a
 # regular click. Tunable; 0.4s feels like a deliberate "hold" without
