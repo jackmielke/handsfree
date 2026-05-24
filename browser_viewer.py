@@ -6601,6 +6601,14 @@ _shaka_armed: bool = True
 _shaka_last_at: float = 0.0
 SHAKA_COOLDOWN_S: float = 1.5
 
+# 🤘 Rock-on → force hands-off mode. Default ON. The detector only
+# runs when hands are already ON (hands-off blanks the gesture
+# pipeline), so throwing 🤘 always flips back to OFF without bouncing.
+_rock_off_enabled: bool = True
+_rock_off_armed: bool = True
+_rock_off_last_at: float = 0.0
+ROCK_OFF_COOLDOWN_S: float = 1.5
+
 # Head bob UP (chin-lift) → Cmd+C copy. Off by default — accidental
 # nods kept firing copies during normal conversation. Opt-in via the
 # 🙆 head-up copy tile in the experiments bar.
@@ -9235,6 +9243,25 @@ def _is_peace_sign(hand) -> bool:
     return idx_ext and mid_ext and ring_cur and pink_cur
 
 
+def _is_rock_on(hand) -> bool:
+    """🤘 rock-on / metal horns: index + pinky extended, middle + ring
+    curled, thumb curled across palm (NOT extended — that would be
+    ILY/🤟). Distinct from 🤙 shaka (thumb out) and ✌️ peace
+    (index+middle). Used to force hands-off mode."""
+    if not (_finger_extended(hand, 8, 6)
+            and _finger_curled(hand, 12, 10)
+            and _finger_curled(hand, 16, 14)
+            and _finger_extended(hand, 20, 18)):
+        return False
+    # Thumb must NOT be splayed outward — that would make it ILY/🤟.
+    t = hand[4]; ref = hand[5]
+    dx = float(t.x) - float(ref.x)
+    dy = float(t.y) - float(ref.y)
+    if (dx * dx + dy * dy) ** 0.5 > 0.10:
+        return False
+    return True
+
+
 def _is_shaka(hand) -> bool:
     """🤙 shaka / hang loose: thumb + pinky extended outward, index +
     middle + ring curled. Distinct enough from every other gesture
@@ -9624,6 +9651,16 @@ def _ok_drag_force_release() -> None:
             pass
     _ok_drag_locked = False
     _ok_drag_armed = True
+
+
+def _detect_rock_off(hands_lm_list, now: float) -> bool:
+    if not hands_lm_list:
+        globals()['_rock_off_armed'] = True
+        return False
+    match = any(_is_rock_on(h) for h in hands_lm_list)
+    return _edge_trigger_gesture(match, '_rock_off_armed',
+                                  '_rock_off_last_at',
+                                  now, cooldown=ROCK_OFF_COOLDOWN_S)
 
 
 def _detect_shaka_reload(hands_lm_list, now: float) -> bool:
@@ -10058,6 +10095,13 @@ def _capture_loop() -> None:
                 _play_sound("Frog")     # silly little blip
             except Exception as e:
                 print(f"[viewer] shaka reload failed: {e}", flush=True)
+        # 🤘 Rock-on → FORCE HANDS OFF. The detector only runs when
+        # hands are already on (hands-off blanks the gesture pipeline),
+        # so a single throw of 🤘 always flips back to hands-off.
+        if (_rock_off_enabled and _system_enabled
+                and _detect_rock_off(hands_lm_list, now)):
+            print("[viewer] 🤘 rock-on → hands off", flush=True)
+            _set_hands_disabled(True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
