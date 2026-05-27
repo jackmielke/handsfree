@@ -736,10 +736,11 @@ def _v2_loop_vosk() -> None:
             for w in phrase.split():
                 if w not in grammar_words:
                     grammar_words.append(w)
-    # Wake-word tokens so Vosk can transcribe "hey wonder" / "bye wonder".
+    # Wake-word tokens so Vosk can transcribe "hey wonder" / "bye wonder"
+    # / "yo yo".
     for w in ("hey", "okay", "wonder", "wander", "wonderful",
               "bye", "goodbye", "later", "stop", "thanks", "see", "you",
-              "wake", "up", "by"):
+              "wake", "up", "by", "yo", "yoyo"):
         if w not in grammar_words:
             grammar_words.append(w)
     grammar_words.append("[unk]")
@@ -1785,6 +1786,7 @@ VISION_HTML = r"""<!doctype html>
       v2ModeTitle.style.color = 'var(--warm)';
       v2ModeSub.innerHTML =
         'say <span style="color:var(--ink); font-weight:700;">"hey wonder"</span>' +
+        ' or <span style="color:var(--ink); font-weight:700;">"yo yo"</span>' +
         ' to arm commands · or click arm →';
       v2Toggle.textContent = 'arm';
       v2Toggle.style.background = '#2a1a08';
@@ -6483,7 +6485,7 @@ V2_FRONTMOST_TTL_S: float = 0.6       # refresh interval
 # command mode; any disarm phrase deactivates. Prevents the awkward
 # "I just disarmed by saying wonder, did I re-arm?" toggle ambiguity.
 _v2_arm_phrases: tuple = ("hey wonder", "okay wonder", "wake up wonder",
-                           "hey wander")
+                           "hey wander", "yo yo", "yoyo")
 _v2_disarm_phrases: tuple = ("bye wonder", "later wonder", "goodbye wonder",
                               "stop wonder", "thanks wonder", "see you wonder",
                               "by wonder")
