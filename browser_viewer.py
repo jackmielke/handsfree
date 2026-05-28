@@ -284,6 +284,10 @@ def _v2_dispatch_action(action: str) -> None:
             _set_hands_disabled(True)
         elif action == "hands_on":
             _set_hands_disabled(False)
+        elif action == "stillness_on":
+            _set_stillness_mode(True)
+        elif action == "stillness_off":
+            _set_stillness_mode(False)
         else:
             print(f"[v2] unknown action {action}", flush=True)
     except Exception as e:
@@ -3205,6 +3209,7 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
+        <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
@@ -5847,6 +5852,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="hands_off"]');
         if (b) b.classList.toggle('on', !!msg.handsDisabled);
       }
+      if ('stillness' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="stillness"]');
+        if (b) b.classList.toggle('on', !!msg.stillness);
+      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6403,6 +6412,11 @@ _v2_dict: dict = {
     "hands on":            "hands_on",
     "hands back":          "hands_on",
     "use hands":           "hands_on",
+    "stillness on":        "stillness_on",
+    "start stillness":     "stillness_on",
+    "owl mode":            "stillness_on",
+    "stillness off":       "stillness_off",
+    "stop stillness":      "stillness_off",
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 
@@ -6561,6 +6575,22 @@ _capture_fps: float = 0.0
 # accidental gesture triggers. Default ON per user preference: most
 # sessions are voice + face. Toggle off via the tile or "hands on".
 _hands_disabled: bool = True
+
+# 🦉 Stillness mode (experimental). Fully hands-free: head-pose drives
+# the cursor; if the cursor sits still over a spot for ~800ms it fires
+# a click automatically (dwell-to-click). Off by default; opt in via
+# the 🦉 tile or "stillness on" voice command. When enabled, the daemon
+# auto-switches pointing to "head" (remembers the original to restore
+# on exit) and override the hands-off cursor-freeze so head can move
+# the cursor again.
+_stillness_mode: bool = False
+_stillness_prev_pointing: str = ""    # for restore on disable
+_stillness_dwell_enabled: bool = True # sub-option for the click trigger
+STILLNESS_DWELL_S: float = 0.8        # how long cursor must hold still
+STILLNESS_TOLERANCE_PX: float = 18.0  # max drift over the dwell window
+STILLNESS_CLICK_COOLDOWN_S: float = 1.0
+_stillness_pos_history: list = []     # [(x, y, t), ...] last N samples
+_stillness_last_click_at: float = 0.0
 
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
@@ -7933,6 +7963,76 @@ def _hold_wispr_key() -> None:
 
 def _release_wispr_key() -> None:
     _release_wispr_key_up()
+
+
+def _set_stillness_mode(on: bool) -> None:
+    """Toggle 🦉 stillness mode — head-pose cursor + dwell-to-click.
+    Switches pointing method to "head" on enter, restores previous on
+    exit. Triggers cursor recalibration so the head-center is fresh."""
+    global _stillness_mode, _stillness_prev_pointing, _pointing_method
+    global _cursor_calibrated, _cursor_calib_start, _stillness_pos_history
+    _stillness_mode = bool(on)
+    if _stillness_mode:
+        _stillness_prev_pointing = _pointing_method
+        _pointing_method = "head"
+        _cursor_calibrated = False
+        _cursor_calib_start = time.time()
+        _stillness_pos_history = []
+        print("[viewer] 🦉 stillness ON — head cursor + dwell click",
+              flush=True)
+        _toast("Wonder",
+               "🦉 stillness on — head moves, dwell to click")
+        _push_vision_event("🦉 stillness on")
+        _play_sound("Hero")
+    else:
+        if _stillness_prev_pointing:
+            _pointing_method = _stillness_prev_pointing
+            _stillness_prev_pointing = ""
+        _cursor_calibrated = False
+        _cursor_calib_start = time.time()
+        _stillness_pos_history = []
+        print("[viewer] 🦉 stillness off — restored pointing → "
+              f"{_pointing_method}", flush=True)
+        _toast("Wonder", "🦉 stillness off")
+        _push_vision_event("🦉 stillness off")
+        _play_sound("Pop")
+
+
+def _update_stillness_dwell_click(cur_x: float, cur_y: float,
+                                   now: float) -> bool:
+    """Dwell-to-click detector. Tracks recent cursor positions; if the
+    cursor has stayed within STILLNESS_TOLERANCE_PX for ≥ STILLNESS_DWELL_S
+    AND no dwell-click has fired in STILLNESS_CLICK_COOLDOWN_S, fire one.
+    Returns True if a click should fire this frame."""
+    global _stillness_pos_history, _stillness_last_click_at
+    if not _stillness_dwell_enabled:
+        return False
+    # Append + drop expired entries (older than DWELL_S * 1.4 for buffer).
+    _stillness_pos_history.append((cur_x, cur_y, now))
+    cutoff = now - STILLNESS_DWELL_S * 1.4
+    _stillness_pos_history = [
+        e for e in _stillness_pos_history if e[2] >= cutoff
+    ]
+    if not _stillness_pos_history:
+        return False
+    # Need at least DWELL_S of samples.
+    if (now - _stillness_pos_history[0][2]) < STILLNESS_DWELL_S:
+        return False
+    if (now - _stillness_last_click_at) < STILLNESS_CLICK_COOLDOWN_S:
+        return False
+    # Check spread over the last DWELL_S window.
+    recent = [e for e in _stillness_pos_history
+              if (now - e[2]) <= STILLNESS_DWELL_S]
+    if len(recent) < 2:
+        return False
+    xs = [e[0] for e in recent]
+    ys = [e[1] for e in recent]
+    if (max(xs) - min(xs)) > STILLNESS_TOLERANCE_PX:
+        return False
+    if (max(ys) - min(ys)) > STILLNESS_TOLERANCE_PX:
+        return False
+    _stillness_last_click_at = now
+    return True
 
 
 def _set_hands_disabled(on: bool) -> None:
@@ -9703,9 +9803,14 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     # In hands-off mode the daemon DOES NOT move the cursor at all —
     # the user's physical mouse / trackpad controls position freely
     # and mouth-clicks fire wherever the OS cursor currently is.
+    # In hands-off mode, the daemon doesn't normally move the cursor.
+    # Exception: 🦉 stillness mode wants head-driven cursor + dwell-click
+    # specifically because the user can't use their hand — so it
+    # overrides the hands-off freeze.
+    cursor_movement_allowed = (not _hands_disabled) or _stillness_mode
     pointing_active = (_cursor_enabled and _cursor_calibrated
                        and not _scroll_active
-                       and not _hands_disabled)
+                       and cursor_movement_allowed)
     if _cursor_enabled and not _cursor_calibrated:
         if (_cursor_calib_start is not None
                 and now - _cursor_calib_start >= CURSOR_CALIB_S):
@@ -9750,6 +9855,18 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
             _cur_x += (tx - _cur_x) * CURSOR_SMOOTHING
             _cur_y += (ty - _cur_y) * CURSOR_SMOOTHING
             _move_cursor_virtual(_cur_x, _cur_y)
+            # 🦉 Stillness dwell-click: if cursor has stayed put for
+            # STILLNESS_DWELL_S, fire a click + Pop sound. Only runs in
+            # stillness mode so it can't trigger in normal use.
+            if (_stillness_mode and _stillness_dwell_enabled
+                    and _update_stillness_dwell_click(_cur_x, _cur_y, now)):
+                try:
+                    pyautogui.click(_pause=False)
+                    print("[viewer] 🦉 dwell click", flush=True)
+                    _push_vision_event("🦉 dwell click")
+                    _play_sound("Pop")
+                except Exception as e:
+                    print(f"[viewer] dwell click failed: {e}", flush=True)
 
     # ---- click ------------------------------------------------------------
     primary = False
@@ -11079,6 +11196,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "handsDisabled": _hands_disabled}).encode(),
                 )
                 return
+            if action == "stillness":
+                _set_stillness_mode(bool(data.get("on")))
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "stillness": _stillness_mode}).encode(),
+                )
+                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11525,6 +11650,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "systemEnabled": _system_enabled,
                         "tTimeout": _t_timeout_enabled,
                         "handsDisabled": _hands_disabled,
+                        "stillness": _stillness_mode,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
