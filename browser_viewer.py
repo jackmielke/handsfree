@@ -10082,6 +10082,20 @@ def _capture_loop() -> None:
         # from `hands_for_cursor`; everything else uses the blanked
         # `hands_lm_list`.
         hands_for_cursor = list(hands_lm_list)
+        # 🤘 Rock-on is the "panic escape" gesture: it must always work
+        # so the user can bail out of stillness mode (or any state) by
+        # throwing one hand sign. Runs BEFORE the hands-off blanking
+        # against the FULL hand list, so it fires even when hands are
+        # disabled. Action: force stillness OFF and hands-off ON — the
+        # universal "back to my safe default" gesture.
+        if (_rock_off_enabled and _system_enabled
+                and _detect_rock_off(hands_for_cursor, now)):
+            print("[viewer] 🤘 rock-on → escape (stillness off, hands off)",
+                  flush=True)
+            if _stillness_mode:
+                _set_stillness_mode(False)
+            if not _hands_disabled:
+                _set_hands_disabled(True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
@@ -10214,13 +10228,6 @@ def _capture_loop() -> None:
                 _play_sound("Frog")     # silly little blip
             except Exception as e:
                 print(f"[viewer] shaka reload failed: {e}", flush=True)
-        # 🤘 Rock-on → FORCE HANDS OFF. The detector only runs when
-        # hands are already on (hands-off blanks the gesture pipeline),
-        # so a single throw of 🤘 always flips back to hands-off.
-        if (_rock_off_enabled and _system_enabled
-                and _detect_rock_off(hands_lm_list, now)):
-            print("[viewer] 🤘 rock-on → hands off", flush=True)
-            _set_hands_disabled(True)
         # Two-hand tab swipe → Cmd+Shift+]/[.
         tab_dir = _update_tab_swipe(hands_lm_list, now)
         if tab_dir is not None and _system_enabled and not _jam_mode:
