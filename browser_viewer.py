@@ -288,6 +288,10 @@ def _v2_dispatch_action(action: str) -> None:
             _set_stillness_mode(True)
         elif action == "stillness_off":
             _set_stillness_mode(False)
+        elif action == "mouth_click_off":
+            _set_mouth_click_disabled(True)
+        elif action == "mouth_click_on":
+            _set_mouth_click_disabled(False)
         else:
             print(f"[v2] unknown action {action}", flush=True)
     except Exception as e:
@@ -3210,6 +3214,7 @@ HTML = """<!doctype html>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
+        <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
@@ -5856,6 +5861,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="stillness"]');
         if (b) b.classList.toggle('on', !!msg.stillness);
       }
+      if ('mouthClickDisabled' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="mouth_click_disabled"]');
+        if (b) b.classList.toggle('on', !!msg.mouthClickDisabled);
+      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6417,6 +6426,12 @@ _v2_dict: dict = {
     "owl mode":            "stillness_on",
     "stillness off":       "stillness_off",
     "stop stillness":      "stillness_off",
+    "mouth off":           "mouth_click_off",
+    "stop mouth":          "mouth_click_off",
+    "disable mouth":       "mouth_click_off",
+    "mouth on":            "mouth_click_on",
+    "enable mouth":        "mouth_click_on",
+    "use mouth":           "mouth_click_on",
 }
 _v2_match_threshold: float = 0.65  # min ratio for a fuzzy match to fire
 
@@ -6640,6 +6655,16 @@ _rock_off_enabled: bool = True
 _rock_off_armed: bool = True
 _rock_off_last_at: float = 0.0
 ROCK_OFF_COOLDOWN_S: float = 1.5
+
+# 🤟 ILY → toggle mouth-click on/off. Default ON (the gesture itself
+# is opt-in; mouth click stays on by default).
+_ily_mouth_toggle_enabled: bool = True
+_ily_armed: bool = True
+_ily_last_at: float = 0.0
+ILY_COOLDOWN_S: float = 1.5
+# When True, the mouth-click hybrid stops firing clicks/drags even
+# though the click_method may still be set to "mouth". Toggled by 🤟.
+_mouth_click_disabled: bool = False
 
 # Head bob UP (chin-lift) → Cmd+C copy. Off by default — accidental
 # nods kept firing copies during normal conversation. Opt-in via the
@@ -9364,6 +9389,24 @@ def _is_rock_on(hand) -> bool:
     return True
 
 
+def _is_ily(hand) -> bool:
+    """🤟 ILY / "I love you": thumb + index + pinky extended,
+    middle + ring curled. Distinct from rock-on (thumb curled),
+    shaka (no index), peace (middle extended), thumbs (only thumb)."""
+    if not (_finger_extended(hand, 8, 6)        # index extended
+            and _finger_curled(hand, 12, 10)    # middle curled
+            and _finger_curled(hand, 16, 14)    # ring curled
+            and _finger_extended(hand, 20, 18)): # pinky extended
+        return False
+    # Thumb MUST be extended outward (away from index MCP).
+    t = hand[4]; ref = hand[5]
+    dx = float(t.x) - float(ref.x)
+    dy = float(t.y) - float(ref.y)
+    if (dx * dx + dy * dy) ** 0.5 < 0.10:
+        return False  # thumb is curled across palm — that's rock-on
+    return True
+
+
 def _is_shaka(hand) -> bool:
     """🤙 shaka / hang loose: thumb + pinky extended outward, index +
     middle + ring curled. Distinct enough from every other gesture
@@ -9765,6 +9808,31 @@ def _detect_rock_off(hands_lm_list, now: float) -> bool:
                                   now, cooldown=ROCK_OFF_COOLDOWN_S)
 
 
+def _detect_ily_toggle(hands_lm_list, now: float) -> bool:
+    if not hands_lm_list:
+        globals()['_ily_armed'] = True
+        return False
+    match = any(_is_ily(h) for h in hands_lm_list)
+    return _edge_trigger_gesture(match, '_ily_armed',
+                                  '_ily_last_at',
+                                  now, cooldown=ILY_COOLDOWN_S)
+
+
+def _set_mouth_click_disabled(on: bool) -> None:
+    """Toggle whether the mouth-click hybrid fires actions."""
+    global _mouth_click_disabled, _click_hybrid_state
+    _mouth_click_disabled = bool(on)
+    # If we were mid-hold, force-release so a stuck mouseDown can't
+    # outlive the toggle.
+    if _mouth_click_disabled:
+        _click_hybrid_force_release()
+    label = "👄 mouth click off" if _mouth_click_disabled else "👄 mouth click on"
+    print(f"[viewer] {label}", flush=True)
+    _push_vision_event(label)
+    _toast("Wonder", label)
+    _play_sound("Funk" if _mouth_click_disabled else "Hero")
+
+
 def _detect_shaka_reload(hands_lm_list, now: float) -> bool:
     if not hands_lm_list:
         globals()['_shaka_armed'] = True
@@ -9884,7 +9952,12 @@ def _update_cursor(face_matrix, face_landmarks, hands_lm_list,
     elif _click_method == "blink":
         primary = _detect_blink_click(blendshapes, now)
     elif _click_method in HYBRID_METHODS:
-        if _mouth_hold_enabled:
+        # 🤟 ILY toggle can disable mouth-click without changing the
+        # configured click method — so the user can toggle it on/off
+        # without losing their pref.
+        if _click_method == "mouth" and _mouth_click_disabled:
+            primary = False
+        elif _mouth_hold_enabled:
             primary = _update_click_hybrid(
                 _click_method, blendshapes, hands_lm_list, now,
             )
@@ -10096,6 +10169,14 @@ def _capture_loop() -> None:
                 _set_stillness_mode(False)
             if not _hands_disabled:
                 _set_hands_disabled(True)
+        # 🤟 ILY → toggle mouth-click on/off. Also always-available
+        # (runs against the full hands list pre-blank) so the user can
+        # disable mouth-click even while in hands-off mode.
+        if (_ily_mouth_toggle_enabled and _system_enabled
+                and _detect_ily_toggle(hands_for_cursor, now)):
+            print("[viewer] 🤟 ILY → toggle mouth click "
+                  f"(was disabled={_mouth_click_disabled})", flush=True)
+            _set_mouth_click_disabled(not _mouth_click_disabled)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
@@ -11211,6 +11292,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "stillness": _stillness_mode}).encode(),
                 )
                 return
+            if action == "mouth_click_disabled":
+                _set_mouth_click_disabled(bool(data.get("on")))
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "mouthClickDisabled":
+                                _mouth_click_disabled}).encode(),
+                )
+                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11658,6 +11748,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "tTimeout": _t_timeout_enabled,
                         "handsDisabled": _hands_disabled,
                         "stillness": _stillness_mode,
+                        "mouthClickDisabled": _mouth_click_disabled,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
