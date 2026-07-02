@@ -3231,6 +3231,8 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
+        <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff air into your cheeks → Cmd+C copy. Cooldown 0.8s; edge-triggered on the cheekPuff blendshape crossing above 0.55.">🐿 cheek copy</button>
+        <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
@@ -5882,6 +5884,14 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_click_disabled"]');
         if (b) b.classList.toggle('on', !!msg.mouthClickDisabled);
       }
+      if ('cheekCopy' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="cheek_copy"]');
+        if (b) b.classList.toggle('on', !!msg.cheekCopy);
+      }
+      if ('tonguePaste' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="tongue_paste"]');
+        if (b) b.classList.toggle('on', !!msg.tonguePaste);
+      }
       if ('winkCopyPaste' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="wink_copy_paste"]');
         if (b) b.classList.toggle('on', !!msg.winkCopyPaste);
@@ -6704,6 +6714,24 @@ _mouth_click_disabled: bool = False
 # 🙆 head-up copy tile in the experiments bar.
 _head_copy_enabled: bool = False
 
+# 🐿 Cheek puff → copy (Cmd+C). Fire when cheekPuff blendshape crosses
+# a high threshold — deliberate air-puff, not casual cheek movement.
+_cheek_copy_enabled: bool = True
+_cheek_armed: bool = True
+_cheek_last_at: float = 0.0
+CHEEK_PUFF_THR: float = 0.55       # deliberate puff
+CHEEK_PUFF_RESET_THR: float = 0.25 # released
+CHEEK_COOLDOWN_S: float = 0.8
+
+# 👅 Tongue out → paste (Cmd+V). Uses the tongueOut blendshape.
+# Extremely rare in ambient face expressions.
+_tongue_paste_enabled: bool = True
+_tongue_armed: bool = True
+_tongue_last_at: float = 0.0
+TONGUE_OUT_THR: float = 0.45       # tongue clearly out
+TONGUE_OUT_RESET_THR: float = 0.15
+TONGUE_COOLDOWN_S: float = 0.8
+
 # Mouth-open paste — open jaw briefly to fire Cmd+V.
 # Off by default since "mouth" is also a click method; turning this on
 # while click_method == "mouth" would conflict.
@@ -7093,6 +7121,46 @@ def _ensure_model(path: Path, url: str) -> bool:
 _last_head_up_at: float = 0.0
 HEAD_UP_ASCENT_THRESHOLD = 0.012   # bigger than bob-down so it's deliberate
 HEAD_UP_COOLDOWN_S = 0.55
+
+
+def _detect_cheek_puff_copy(blendshapes, now: float) -> bool:
+    """Edge-triggered cheek puff (both cheeks — the blendshape is a
+    single value). Fires when cheekPuff crosses > THR after having
+    been released. Cooldown prevents rapid re-fires."""
+    global _cheek_armed, _cheek_last_at
+    if not blendshapes:
+        return False
+    v = 0.0
+    for b in blendshapes:
+        if b.category_name == "cheekPuff":
+            v = float(b.score); break
+    if v > CHEEK_PUFF_THR and _cheek_armed:
+        if now - _cheek_last_at > CHEEK_COOLDOWN_S:
+            _cheek_last_at = now
+            _cheek_armed = False
+            return True
+    elif v < CHEEK_PUFF_RESET_THR:
+        _cheek_armed = True
+    return False
+
+
+def _detect_tongue_paste(blendshapes, now: float) -> bool:
+    """Edge-triggered tongue-out."""
+    global _tongue_armed, _tongue_last_at
+    if not blendshapes:
+        return False
+    v = 0.0
+    for b in blendshapes:
+        if b.category_name == "tongueOut":
+            v = float(b.score); break
+    if v > TONGUE_OUT_THR and _tongue_armed:
+        if now - _tongue_last_at > TONGUE_COOLDOWN_S:
+            _tongue_last_at = now
+            _tongue_armed = False
+            return True
+    elif v < TONGUE_OUT_RESET_THR:
+        _tongue_armed = True
+    return False
 
 
 def _detect_head_bob_up(nose_y: Optional[float], now: float) -> bool:
@@ -10285,6 +10353,28 @@ def _capture_loop() -> None:
                 _toast("handsfree", "copied ✂︎")
             except Exception as e:
                 print(f"[viewer] head-up copy failed: {e}", flush=True)
+        # 🐿 Cheek puff → Cmd+C copy.
+        if (_cheek_copy_enabled and _system_enabled
+                and _detect_cheek_puff_copy(face_blendshapes, now)):
+            print("[viewer] 🐿 cheek puff → cmd+c", flush=True)
+            _push_vision_event("🐿 cheek → copy")
+            try:
+                _fire_hotkey("cmd+c")
+                _toast("Wonder", "🐿 copied")
+                _play_sound("Pop")
+            except Exception as e:
+                print(f"[viewer] cheek copy failed: {e}", flush=True)
+        # 👅 Tongue out → Cmd+V paste.
+        if (_tongue_paste_enabled and _system_enabled
+                and _detect_tongue_paste(face_blendshapes, now)):
+            print("[viewer] 👅 tongue → cmd+v", flush=True)
+            _push_vision_event("👅 tongue → paste")
+            try:
+                _fire_hotkey("cmd+v")
+                _toast("Wonder", "👅 pasted")
+                _play_sound("Bottle")
+            except Exception as e:
+                print(f"[viewer] tongue paste failed: {e}", flush=True)
         # 😉 Wink copy / paste. Skipped if wink is also the click method
         # (any variant) so we don't fire both actions on a single wink.
         _wink_click_method = _click_method in ("wink", "right_wink")
@@ -11404,6 +11494,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "stillness": _stillness_mode}).encode(),
                 )
                 return
+            if action == "cheek_copy":
+                global _cheek_copy_enabled, _cheek_armed
+                _cheek_copy_enabled = bool(data.get("on"))
+                _cheek_armed = True
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "cheekCopy": _cheek_copy_enabled}).encode(),
+                )
+                return
+            if action == "tongue_paste":
+                global _tongue_paste_enabled, _tongue_armed
+                _tongue_paste_enabled = bool(data.get("on"))
+                _tongue_armed = True
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "tonguePaste": _tongue_paste_enabled}).encode(),
+                )
+                return
             if action == "mouth_click_disabled":
                 _set_mouth_click_disabled(bool(data.get("on")))
                 self._write_status(
@@ -11874,6 +11984,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "stillness": _stillness_mode,
                         "mouthClickDisabled": _mouth_click_disabled,
                         "winkCopyPaste": _wink_copy_paste_enabled,
+                        "cheekCopy": _cheek_copy_enabled,
+                        "tonguePaste": _tongue_paste_enabled,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
