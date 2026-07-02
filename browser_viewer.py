@@ -3231,6 +3231,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
+        <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
         <button class="cc-opt" data-exp="mouth_hold" title="Long-press hybrid for ANY click method: short hold → click, long hold (≥0.4s) → mouseDown drag, release → mouseUp. Works for brow, smile, mouth, and pinch. Wink/blink stay edge-only.">⏳ click long-press hybrid</button>
         <button class="cc-opt" data-exp="peace_rclick" title="Hold up a peace sign ✌️ to press-and-hold the mouse (drag / select). Release the sign to let go.">✌️ hold-to-drag</button>
@@ -5881,6 +5882,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_click_disabled"]');
         if (b) b.classList.toggle('on', !!msg.mouthClickDisabled);
       }
+      if ('winkCopyPaste' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="wink_copy_paste"]');
+        if (b) b.classList.toggle('on', !!msg.winkCopyPaste);
+      }
       if ('mouthHold' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="mouth_hold"]');
         if (b) b.classList.toggle('on', !!msg.mouthHold);
@@ -6836,6 +6841,17 @@ BROW_CLICK_COOLDOWN_S = 0.7
 WINK_CLOSED_THRESHOLD = 0.55   # one eye must be this closed…
 WINK_OPEN_THRESHOLD   = 0.3    # …while the other stays below this (loose rearm)
 WINK_COOLDOWN_S       = 0.5
+
+# 😉 Wink copy/paste: left-wink = copy (Cmd+C), right-wink = paste (Cmd+V).
+# Independent of click-method wink so both features can coexist. Default
+# ON — the detectors have their own armed/last_at globals so they don't
+# race with the click-method wink handlers.
+_wink_copy_paste_enabled: bool = True
+_wink_copy_armed: bool = True
+_wink_copy_last_at: float = 0.0
+_wink_paste_armed: bool = True
+_wink_paste_last_at: float = 0.0
+WINK_COPY_PASTE_COOLDOWN_S: float = 0.6
 BLINK_CLICK_THRESHOLD = 0.55   # both eyes closed: score on both
 BLINK_CLICK_OPEN_THR  = 0.3
 BLINK_CLICK_COOLDOWN_S = 0.45
@@ -8659,6 +8675,53 @@ def _detect_right_wink_click(blendshapes, now: float) -> bool:
     return fired
 
 
+def _detect_left_wink_copy(blendshapes, now: float) -> bool:
+    """Left-eye-only wink → Cmd+C. Independent globals from the click-
+    method wink so both can be enabled at once without stealing edges."""
+    global _wink_copy_last_at, _wink_copy_armed
+    if not blendshapes:
+        return False
+    left = right = 0.0
+    for b in blendshapes:
+        if b.category_name == "eyeBlinkLeft":
+            left = float(b.score)
+        elif b.category_name == "eyeBlinkRight":
+            right = float(b.score)
+    winking = left > WINK_CLOSED_THRESHOLD and right < WINK_OPEN_THRESHOLD
+    fired = False
+    if winking and _wink_copy_armed:
+        if now - _wink_copy_last_at > WINK_COPY_PASTE_COOLDOWN_S:
+            _wink_copy_last_at = now
+            _wink_copy_armed = False
+            fired = True
+    elif not winking and left < WINK_OPEN_THRESHOLD:
+        _wink_copy_armed = True
+    return fired
+
+
+def _detect_right_wink_paste(blendshapes, now: float) -> bool:
+    """Right-eye-only wink → Cmd+V."""
+    global _wink_paste_last_at, _wink_paste_armed
+    if not blendshapes:
+        return False
+    left = right = 0.0
+    for b in blendshapes:
+        if b.category_name == "eyeBlinkLeft":
+            left = float(b.score)
+        elif b.category_name == "eyeBlinkRight":
+            right = float(b.score)
+    winking = right > WINK_CLOSED_THRESHOLD and left < WINK_OPEN_THRESHOLD
+    fired = False
+    if winking and _wink_paste_armed:
+        if now - _wink_paste_last_at > WINK_COPY_PASTE_COOLDOWN_S:
+            _wink_paste_last_at = now
+            _wink_paste_armed = False
+            fired = True
+    elif not winking and right < WINK_OPEN_THRESHOLD:
+        _wink_paste_armed = True
+    return fired
+
+
 def _detect_blink_click(blendshapes, now: float) -> bool:
     """Edge-triggered deliberate blink: BOTH eyes closed hard together."""
     global _last_blink_click_at, _blink_click_armed
@@ -10222,6 +10285,27 @@ def _capture_loop() -> None:
                 _toast("handsfree", "copied ✂︎")
             except Exception as e:
                 print(f"[viewer] head-up copy failed: {e}", flush=True)
+        # 😉 Wink copy / paste. Skipped if wink is also the click method
+        # (any variant) so we don't fire both actions on a single wink.
+        _wink_click_method = _click_method in ("wink", "right_wink")
+        if (_wink_copy_paste_enabled and _system_enabled
+                and not _wink_click_method):
+            if _detect_left_wink_copy(face_blendshapes, now):
+                print("[viewer] 😉 left wink → cmd+c", flush=True)
+                _push_vision_event("😉 left wink → copy")
+                try:
+                    _fire_hotkey("cmd+c")
+                    _toast("handsfree", "copied ✂︎ (left wink)")
+                except Exception as e:
+                    print(f"[viewer] left-wink copy failed: {e}", flush=True)
+            if _detect_right_wink_paste(face_blendshapes, now):
+                print("[viewer] 😉 right wink → cmd+v", flush=True)
+                _push_vision_event("😉 right wink → paste")
+                try:
+                    _fire_hotkey("cmd+v")
+                    _toast("handsfree", "pasted 📋 (right wink)")
+                except Exception as e:
+                    print(f"[viewer] right-wink paste failed: {e}", flush=True)
         # Mouth-open paste — fires Cmd+V on each open-jaw edge.
         # Skipped when mouth is also the click method or mouth-hold is on,
         # to avoid double-actions on a single jaw-open.
@@ -11329,6 +11413,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 _mouth_click_disabled}).encode(),
                 )
                 return
+            if action == "wink_copy_paste":
+                global _wink_copy_paste_enabled
+                _wink_copy_paste_enabled = bool(data.get("on"))
+                print(f"[viewer] 😉 wink copy/paste = "
+                      f"{_wink_copy_paste_enabled}", flush=True)
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "winkCopyPaste":
+                                _wink_copy_paste_enabled}).encode(),
+                )
+                return
             if action == "mouth_hold":
                 global _mouth_hold_enabled
                 _mouth_hold_enabled = bool(data.get("on"))
@@ -11777,6 +11873,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "handsDisabled": _hands_disabled,
                         "stillness": _stillness_mode,
                         "mouthClickDisabled": _mouth_click_disabled,
+                        "winkCopyPaste": _wink_copy_paste_enabled,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
