@@ -315,6 +315,21 @@ def _v2_handle_final(text: str) -> None:
     if not text:
         return
     low = text.lower()
+    # 0. 🔥 Always-hot phrases. Bypass the wake-word gate entirely so
+    # muscle-memory commands (copy / paste / cut) fire without the
+    # "hey wonder" preamble. Exact single-word match ONLY — so "I'll
+    # copy that" or "let me paste this" don't trigger.
+    exact = low.strip().rstrip(".,!?")
+    if _v2_always_hot_enabled and exact in _v2_always_hot:
+        action = _v2_always_hot[exact]
+        print(f"[v2] 🔥 always-hot '{exact}' → {action}", flush=True)
+        _v2_last_match = exact
+        _v2_last_action = action
+        _v2_last_match_at = time.time()
+        _push_vision_event(f"🔥 {exact}")
+        _v2_push_final(text, matched=exact, action=action)
+        _v2_dispatch_action(action)
+        return
     # 1. Wake-word: distinct ARM and DISARM phrases (no toggle ambiguity).
     matched_arm = next((w for w in _v2_arm_phrases if w in low), None)
     matched_disarm = next((w for w in _v2_disarm_phrases if w in low), None)
@@ -748,7 +763,8 @@ def _v2_loop_vosk() -> None:
     # / "yo yo".
     for w in ("hey", "okay", "wonder", "wander", "wonderful",
               "bye", "goodbye", "later", "stop", "thanks", "see", "you",
-              "wake", "up", "by", "yo", "yoyo"):
+              "wake", "up", "by", "yo", "yoyo",
+              "cut"):   # copy + paste come in via the dict already
         if w not in grammar_words:
             grammar_words.append(w)
     grammar_words.append("[unk]")
@@ -6520,6 +6536,18 @@ _v2_disarm_phrases: tuple = ("bye wonder", "later wonder", "goodbye wonder",
                               "by wonder")
 # Combined for grammar/contextualStrings biasing.
 _v2_wake_phrases: tuple = _v2_arm_phrases + _v2_disarm_phrases
+
+# 🔥 Always-hot phrases — fire even when command_mode is OFF (no need
+# to say "hey wonder" first). Must be EXACT single-word matches so
+# they can't fire on incidental speech ("I'll copy that" won't
+# match "copy" thanks to the strict single-word rule in the fuzzy
+# matcher). Purely for muscle-memory shortcuts.
+_v2_always_hot_enabled: bool = True
+_v2_always_hot: dict = {
+    "copy":  "hotkey:cmd+c",
+    "paste": "hotkey:cmd+v",
+    "cut":   "hotkey:cmd+x",
+}
 _v2_command_mode: bool = False        # commands fire only while True
 _v2_command_mode_at: float = 0.0      # last toggle timestamp
 _v2_autostart: bool = True            # start engine on daemon boot
