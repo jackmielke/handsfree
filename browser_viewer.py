@@ -3232,6 +3232,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
+        <button class="cc-opt" data-exp="two_hand_cc" title="✌️✌️ Both hands doing peace = Cmd+C copy · 👌👌 Both hands doing OK = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✌️👌 two-hand copy/paste</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -5888,6 +5889,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="cheek_copy"]');
         if (b) b.classList.toggle('on', !!msg.cheekCopy);
       }
+      if ('twoHandCc' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="two_hand_cc"]');
+        if (b) b.classList.toggle('on', !!msg.twoHandCc);
+      }
       if ('tonguePaste' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="tongue_paste"]');
         if (b) b.classList.toggle('on', !!msg.tonguePaste);
@@ -6729,6 +6734,17 @@ CHEEK_PUFF_RESET_THR: float = 0.15
 CHEEK_COOLDOWN_S: float = 0.8
 CHEEK_ASYMMETRY_RATIO: float = 1.08  # deviation vs baseline to call a side
 _cheek_ratio_baseline: Optional[float] = None
+
+# ✌️✌️ Two-hand peace → copy (Cmd+C).
+# 👌👌 Two-hand OK   → paste (Cmd+V).
+# Both hands must simultaneously show the gesture — near-impossible
+# to trigger accidentally. Edge-triggered per state transition.
+_two_hand_cc_enabled: bool = True
+_two_peace_armed: bool = True
+_two_peace_last_at: float = 0.0
+_two_ok_armed: bool = True
+_two_ok_last_at: float = 0.0
+TWO_HAND_CC_COOLDOWN_S: float = 1.0
 
 # 👅 Tongue out → paste (Cmd+V). Uses the tongueOut blendshape.
 # Extremely rare in ambient face expressions.
@@ -10017,6 +10033,40 @@ def _detect_rock_off(hands_lm_list, now: float) -> bool:
                                   now, cooldown=ROCK_OFF_COOLDOWN_S)
 
 
+def _detect_two_hand_peace(hands_lm_list, now: float) -> bool:
+    """Both hands showing ✌️ simultaneously. Edge-triggered + cooldown."""
+    global _two_peace_armed, _two_peace_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _two_peace_armed = True
+        return False
+    both = sum(1 for h in hands_lm_list if _is_peace_sign(h)) >= 2
+    if both and _two_peace_armed:
+        if now - _two_peace_last_at > TWO_HAND_CC_COOLDOWN_S:
+            _two_peace_last_at = now
+            _two_peace_armed = False
+            return True
+    elif not both:
+        _two_peace_armed = True
+    return False
+
+
+def _detect_two_hand_ok(hands_lm_list, now: float) -> bool:
+    """Both hands showing 👌 simultaneously. Edge-triggered + cooldown."""
+    global _two_ok_armed, _two_ok_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _two_ok_armed = True
+        return False
+    both = sum(1 for h in hands_lm_list if _is_ok_sign(h)) >= 2
+    if both and _two_ok_armed:
+        if now - _two_ok_last_at > TWO_HAND_CC_COOLDOWN_S:
+            _two_ok_last_at = now
+            _two_ok_armed = False
+            return True
+    elif not both:
+        _two_ok_armed = True
+    return False
+
+
 def _detect_ily_toggle(hands_lm_list, now: float) -> bool:
     if not hands_lm_list:
         globals()['_ily_armed'] = True
@@ -10386,6 +10436,30 @@ def _capture_loop() -> None:
             print("[viewer] 🤟 ILY → toggle mouth click "
                   f"(was disabled={_mouth_click_disabled})", flush=True)
             _set_mouth_click_disabled(not _mouth_click_disabled)
+        # ✌️✌️ Two-hand peace → Cmd+C copy.
+        if (_two_hand_cc_enabled and _system_enabled
+                and _detect_two_hand_peace(hands_for_cursor, now)):
+            print("[viewer] ✌️✌️ two-hand peace → cmd+c", flush=True)
+            _push_vision_event("✌️✌️ → copy")
+            try:
+                _fire_hotkey("cmd+c")
+                _toast("Wonder", "✌️✌️ copied")
+                _play_sound("Pop")
+            except Exception as e:
+                print(f"[viewer] two-hand peace copy failed: {e}",
+                      flush=True)
+        # 👌👌 Two-hand OK → Cmd+V paste.
+        if (_two_hand_cc_enabled and _system_enabled
+                and _detect_two_hand_ok(hands_for_cursor, now)):
+            print("[viewer] 👌👌 two-hand OK → cmd+v", flush=True)
+            _push_vision_event("👌👌 → paste")
+            try:
+                _fire_hotkey("cmd+v")
+                _toast("Wonder", "👌👌 pasted")
+                _play_sound("Bottle")
+            except Exception as e:
+                print(f"[viewer] two-hand OK paste failed: {e}",
+                      flush=True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
@@ -11568,6 +11642,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "cheekCopy": _cheek_copy_enabled}).encode(),
                 )
                 return
+            if action == "two_hand_cc":
+                global _two_hand_cc_enabled, _two_peace_armed, _two_ok_armed
+                _two_hand_cc_enabled = bool(data.get("on"))
+                _two_peace_armed = True
+                _two_ok_armed = True
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "twoHandCc": _two_hand_cc_enabled}).encode(),
+                )
+                return
             if action == "tongue_paste":
                 global _tongue_paste_enabled, _tongue_armed
                 _tongue_paste_enabled = bool(data.get("on"))
@@ -12050,6 +12135,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "winkCopyPaste": _wink_copy_paste_enabled,
                         "cheekCopy": _cheek_copy_enabled,
                         "tonguePaste": _tongue_paste_enabled,
+                        "twoHandCc": _two_hand_cc_enabled,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
