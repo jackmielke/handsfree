@@ -12169,6 +12169,27 @@ def main() -> None:
             except Exception as e:
                 print(f"[viewer] voice2 autostart failed: {e}", flush=True)
         threading.Timer(15.0, _kick).start()
+
+    # 🔑 Global hotkey: Ctrl+Option+W toggles the master on/off. Uses
+    # pynput's cross-app keyboard listener; runs in its own daemon
+    # thread and never blocks the main server. Wrapped in try/except so
+    # a permissions issue or listener crash never kills the daemon.
+    def _install_master_hotkey():
+        try:
+            from pynput import keyboard
+            def _on_activate():
+                new_state = not _system_enabled
+                _set_master(new_state, source="hotkey (ctrl+alt+w)")
+            hotkeys = keyboard.GlobalHotKeys({
+                '<ctrl>+<alt>+w': _on_activate,
+            })
+            hotkeys.daemon = True
+            hotkeys.start()
+            print("[viewer] global hotkey listener up "
+                  "(ctrl+alt+w → master toggle)", flush=True)
+        except Exception as e:
+            print(f"[viewer] hotkey listener failed: {e}", flush=True)
+    threading.Timer(1.0, _install_master_hotkey).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
