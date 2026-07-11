@@ -3233,6 +3233,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
         <button class="cc-opt" data-exp="two_hand_cc" title="✌️✌️ Both hands doing peace = Cmd+C copy · 👌👌 Both hands doing OK = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✌️👌 two-hand copy/paste</button>
+        <button class="cc-opt" data-exp="vulcan_undo" title="🖖 Vulcan salute (live long and prosper) → Cmd+Z undo. V-split between middle and ring fingers; rare pose so accidental fires are near-zero. 1s cooldown.">🖖 vulcan undo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -5893,6 +5894,10 @@ HTML = """<!doctype html>
         const b = document.querySelector('#cc-exp-opts [data-exp="two_hand_cc"]');
         if (b) b.classList.toggle('on', !!msg.twoHandCc);
       }
+      if ('vulcanUndo' in msg) {
+        const b = document.querySelector('#cc-exp-opts [data-exp="vulcan_undo"]');
+        if (b) b.classList.toggle('on', !!msg.vulcanUndo);
+      }
       if ('tonguePaste' in msg) {
         const b = document.querySelector('#cc-exp-opts [data-exp="tongue_paste"]');
         if (b) b.classList.toggle('on', !!msg.tonguePaste);
@@ -6740,6 +6745,17 @@ _cheek_ratio_baseline: Optional[float] = None
 # Both hands must simultaneously show the gesture — near-impossible
 # to trigger accidentally. Edge-triggered per state transition.
 _two_hand_cc_enabled: bool = True
+
+# 🖖 Vulcan salute → Cmd+Z undo.
+# Detection: all 4 fingers extended AND a wide gap between the middle
+# and ring fingertips (that's the whole point of the salute — the
+# V-split). Rejected if the middle-ring gap isn't clearly larger than
+# the index-middle gap.
+_vulcan_undo_enabled: bool = True
+_vulcan_armed: bool = True
+_vulcan_last_at: float = 0.0
+VULCAN_COOLDOWN_S: float = 1.0
+VULCAN_SPLIT_RATIO: float = 1.7   # middle-ring gap / index-middle gap
 _two_peace_armed: bool = True
 _two_peace_last_at: float = 0.0
 _two_ok_armed: bool = True
@@ -9614,6 +9630,28 @@ def _is_rock_on(hand) -> bool:
     return True
 
 
+def _is_vulcan(hand) -> bool:
+    """🖖 Vulcan salute / live-long-and-prosper: all four fingers
+    extended, wide V-split between middle and ring fingertips.
+    Distinguishes from an open palm by requiring the middle-ring gap
+    to be clearly larger than the index-middle gap."""
+    if not (_finger_extended(hand, 8, 6)
+            and _finger_extended(hand, 12, 10)
+            and _finger_extended(hand, 16, 14)
+            and _finger_extended(hand, 20, 18)):
+        return False
+    im = hand[12]  # middle tip
+    ir = hand[16]  # ring tip
+    middle_ring = ((float(im.x) - float(ir.x)) ** 2
+                   + (float(im.y) - float(ir.y)) ** 2) ** 0.5
+    ii = hand[8]   # index tip
+    index_middle = ((float(ii.x) - float(im.x)) ** 2
+                    + (float(ii.y) - float(im.y)) ** 2) ** 0.5
+    if index_middle < 1e-4:
+        return False
+    return (middle_ring / index_middle) > VULCAN_SPLIT_RATIO
+
+
 def _is_ily(hand) -> bool:
     """🤟 ILY / "I love you": thumb + index + pinky extended,
     middle + ring curled. Distinct from rock-on (thumb curled),
@@ -10067,6 +10105,23 @@ def _detect_two_hand_ok(hands_lm_list, now: float) -> bool:
     return False
 
 
+def _detect_vulcan_undo(hands_lm_list, now: float) -> bool:
+    """🖖 Vulcan on any hand → fires undo. Edge-triggered + cooldown."""
+    global _vulcan_armed, _vulcan_last_at
+    if not hands_lm_list:
+        _vulcan_armed = True
+        return False
+    match = any(_is_vulcan(h) for h in hands_lm_list)
+    if match and _vulcan_armed:
+        if now - _vulcan_last_at > VULCAN_COOLDOWN_S:
+            _vulcan_last_at = now
+            _vulcan_armed = False
+            return True
+    elif not match:
+        _vulcan_armed = True
+    return False
+
+
 def _detect_ily_toggle(hands_lm_list, now: float) -> bool:
     if not hands_lm_list:
         globals()['_ily_armed'] = True
@@ -10460,6 +10515,17 @@ def _capture_loop() -> None:
             except Exception as e:
                 print(f"[viewer] two-hand OK paste failed: {e}",
                       flush=True)
+        # 🖖 Vulcan salute → Cmd+Z undo.
+        if (_vulcan_undo_enabled and _system_enabled
+                and _detect_vulcan_undo(hands_for_cursor, now)):
+            print("[viewer] 🖖 vulcan → cmd+z", flush=True)
+            _push_vision_event("🖖 vulcan → undo")
+            try:
+                _fire_hotkey("cmd+z")
+                _toast("Wonder", "🖖 undone")
+                _play_sound("Blow")
+            except Exception as e:
+                print(f"[viewer] vulcan undo failed: {e}", flush=True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
@@ -11642,6 +11708,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "cheekCopy": _cheek_copy_enabled}).encode(),
                 )
                 return
+            if action == "vulcan_undo":
+                global _vulcan_undo_enabled, _vulcan_armed
+                _vulcan_undo_enabled = bool(data.get("on"))
+                _vulcan_armed = True
+                self._write_status(
+                    200, "application/json",
+                    json.dumps({"ok": True,
+                                "vulcanUndo": _vulcan_undo_enabled}).encode(),
+                )
+                return
             if action == "two_hand_cc":
                 global _two_hand_cc_enabled, _two_peace_armed, _two_ok_armed
                 _two_hand_cc_enabled = bool(data.get("on"))
@@ -12136,6 +12212,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "cheekCopy": _cheek_copy_enabled,
                         "tonguePaste": _tongue_paste_enabled,
                         "twoHandCc": _two_hand_cc_enabled,
+                        "vulcanUndo": _vulcan_undo_enabled,
                         "captureFps": _capture_fps,
                         "mouthHold": _mouth_hold_enabled,
                         "peaceRclick": _peace_rclick_enabled,
