@@ -3233,7 +3233,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
         <button class="cc-opt" data-exp="two_hand_cc" title="✌️✌️ Both hands doing peace = Cmd+C copy · 👌👌 Both hands doing OK = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✌️👌 two-hand copy/paste</button>
-        <button class="cc-opt" data-exp="vulcan_undo" title="🖖🖖 Both hands doing Vulcan (V-split between middle+ring) → Cmd+Z undo · 👍👍 Both hands doing thumbs-up → Cmd+Shift+Z redo. Two-hand gestures; near-impossible to fire accidentally.">🖖🖖 undo / 👍👍 redo</button>
+        <button class="cc-opt" data-exp="vulcan_undo" title="👎👎 Both hands thumbs-down → Cmd+Z undo · 👍👍 Both hands thumbs-up → Cmd+Shift+Z redo. Two-hand gestures; near-impossible to fire accidentally.">👎👎 undo / 👍👍 redo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -9703,6 +9703,20 @@ def _is_thumbs_up(hand) -> bool:
     return thumb_up and idx_cur and mid_cur and ring_cur and pink_cur
 
 
+def _is_thumbs_down(hand) -> bool:
+    """👎: thumb tip well below wrist, all four fingers curled.
+    Mirror of _is_thumbs_up on the y-axis."""
+    thumb_tip = hand[4]
+    wrist = hand[0]
+    # Thumb clearly below wrist (y increases downward in image coords)
+    thumb_dn = (thumb_tip.y - wrist.y) > 0.10
+    idx_cur  = _finger_curled(hand, 8, 6)
+    mid_cur  = _finger_curled(hand, 12, 10)
+    ring_cur = _finger_curled(hand, 16, 14)
+    pink_cur = _finger_curled(hand, 20, 18)
+    return thumb_dn and idx_cur and mid_cur and ring_cur and pink_cur
+
+
 def _edge_trigger_gesture(match: bool, armed_flag: str, last_at_flag: str,
                           now: float, cooldown: float = GESTURE_COOLDOWN_S) -> bool:
     """Generic edge-trigger: only fires on the transition into `match`,
@@ -10105,13 +10119,13 @@ def _detect_two_hand_ok(hands_lm_list, now: float) -> bool:
     return False
 
 
-def _detect_two_hand_vulcan(hands_lm_list, now: float) -> bool:
-    """🖖🖖 Both hands doing Vulcan → undo. Edge + cooldown."""
+def _detect_two_hand_thumbs_down(hands_lm_list, now: float) -> bool:
+    """👎👎 Both hands doing thumbs-down → undo. Edge + cooldown."""
     global _two_vulcan_armed, _two_vulcan_last_at
     if not hands_lm_list or len(hands_lm_list) < 2:
         _two_vulcan_armed = True
         return False
-    both = sum(1 for h in hands_lm_list if _is_vulcan(h)) >= 2
+    both = sum(1 for h in hands_lm_list if _is_thumbs_down(h)) >= 2
     if both and _two_vulcan_armed:
         if now - _two_vulcan_last_at > VULCAN_COOLDOWN_S:
             _two_vulcan_last_at = now
@@ -10532,17 +10546,17 @@ def _capture_loop() -> None:
             except Exception as e:
                 print(f"[viewer] two-hand OK paste failed: {e}",
                       flush=True)
-        # 🖖🖖 Two-hand Vulcan → Cmd+Z undo.
+        # 👎👎 Two-hand thumbs-down → Cmd+Z undo.
         if (_vulcan_undo_enabled and _system_enabled
-                and _detect_two_hand_vulcan(hands_for_cursor, now)):
-            print("[viewer] 🖖🖖 two-hand vulcan → cmd+z", flush=True)
-            _push_vision_event("🖖🖖 → undo")
+                and _detect_two_hand_thumbs_down(hands_for_cursor, now)):
+            print("[viewer] 👎👎 two-hand thumbs-down → cmd+z", flush=True)
+            _push_vision_event("👎👎 → undo")
             try:
                 _fire_hotkey("cmd+z")
-                _toast("Wonder", "🖖🖖 undone")
+                _toast("Wonder", "👎👎 undone")
                 _play_sound("Blow")
             except Exception as e:
-                print(f"[viewer] vulcan undo failed: {e}", flush=True)
+                print(f"[viewer] undo failed: {e}", flush=True)
         # 👍👍 Two-hand thumbs-up → Cmd+Shift+Z redo.
         if (_vulcan_undo_enabled and _system_enabled
                 and _detect_two_hand_thumbs(hands_for_cursor, now)):
