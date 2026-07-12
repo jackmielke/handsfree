@@ -3233,7 +3233,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
         <button class="cc-opt" data-exp="two_hand_cc" title="✌️✌️ Both hands doing peace = Cmd+C copy · 👌👌 Both hands doing OK = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✌️👌 two-hand copy/paste</button>
-        <button class="cc-opt" data-exp="vulcan_undo" title="🖖 Vulcan salute (live long and prosper) → Cmd+Z undo. V-split between middle and ring fingers; rare pose so accidental fires are near-zero. 1s cooldown.">🖖 vulcan undo</button>
+        <button class="cc-opt" data-exp="vulcan_undo" title="🖖🖖 Both hands doing Vulcan (V-split between middle+ring) → Cmd+Z undo · 👍👍 Both hands doing thumbs-up → Cmd+Shift+Z redo. Two-hand gestures; near-impossible to fire accidentally.">🖖🖖 undo / 👍👍 redo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -6746,14 +6746,14 @@ _cheek_ratio_baseline: Optional[float] = None
 # to trigger accidentally. Edge-triggered per state transition.
 _two_hand_cc_enabled: bool = True
 
-# 🖖 Vulcan salute → Cmd+Z undo.
-# Detection: all 4 fingers extended AND a wide gap between the middle
-# and ring fingertips (that's the whole point of the salute — the
-# V-split). Rejected if the middle-ring gap isn't clearly larger than
-# the index-middle gap.
+# 🖖🖖 Two-hand Vulcan salute → Cmd+Z undo.
+# 👍👍 Two-hand thumbs-up      → Cmd+Shift+Z redo.
+# Both require TWO simultaneously — near-impossible to fire accidentally.
 _vulcan_undo_enabled: bool = True
-_vulcan_armed: bool = True
-_vulcan_last_at: float = 0.0
+_two_vulcan_armed: bool = True
+_two_vulcan_last_at: float = 0.0
+_two_thumbs_armed: bool = True
+_two_thumbs_last_at: float = 0.0
 VULCAN_COOLDOWN_S: float = 1.0
 VULCAN_SPLIT_RATIO: float = 1.7   # middle-ring gap / index-middle gap
 _two_peace_armed: bool = True
@@ -10105,20 +10105,37 @@ def _detect_two_hand_ok(hands_lm_list, now: float) -> bool:
     return False
 
 
-def _detect_vulcan_undo(hands_lm_list, now: float) -> bool:
-    """🖖 Vulcan on any hand → fires undo. Edge-triggered + cooldown."""
-    global _vulcan_armed, _vulcan_last_at
-    if not hands_lm_list:
-        _vulcan_armed = True
+def _detect_two_hand_vulcan(hands_lm_list, now: float) -> bool:
+    """🖖🖖 Both hands doing Vulcan → undo. Edge + cooldown."""
+    global _two_vulcan_armed, _two_vulcan_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _two_vulcan_armed = True
         return False
-    match = any(_is_vulcan(h) for h in hands_lm_list)
-    if match and _vulcan_armed:
-        if now - _vulcan_last_at > VULCAN_COOLDOWN_S:
-            _vulcan_last_at = now
-            _vulcan_armed = False
+    both = sum(1 for h in hands_lm_list if _is_vulcan(h)) >= 2
+    if both and _two_vulcan_armed:
+        if now - _two_vulcan_last_at > VULCAN_COOLDOWN_S:
+            _two_vulcan_last_at = now
+            _two_vulcan_armed = False
             return True
-    elif not match:
-        _vulcan_armed = True
+    elif not both:
+        _two_vulcan_armed = True
+    return False
+
+
+def _detect_two_hand_thumbs(hands_lm_list, now: float) -> bool:
+    """👍👍 Both hands doing thumbs-up → redo. Edge + cooldown."""
+    global _two_thumbs_armed, _two_thumbs_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _two_thumbs_armed = True
+        return False
+    both = sum(1 for h in hands_lm_list if _is_thumbs_up(h)) >= 2
+    if both and _two_thumbs_armed:
+        if now - _two_thumbs_last_at > VULCAN_COOLDOWN_S:
+            _two_thumbs_last_at = now
+            _two_thumbs_armed = False
+            return True
+    elif not both:
+        _two_thumbs_armed = True
     return False
 
 
@@ -10515,17 +10532,28 @@ def _capture_loop() -> None:
             except Exception as e:
                 print(f"[viewer] two-hand OK paste failed: {e}",
                       flush=True)
-        # 🖖 Vulcan salute → Cmd+Z undo.
+        # 🖖🖖 Two-hand Vulcan → Cmd+Z undo.
         if (_vulcan_undo_enabled and _system_enabled
-                and _detect_vulcan_undo(hands_for_cursor, now)):
-            print("[viewer] 🖖 vulcan → cmd+z", flush=True)
-            _push_vision_event("🖖 vulcan → undo")
+                and _detect_two_hand_vulcan(hands_for_cursor, now)):
+            print("[viewer] 🖖🖖 two-hand vulcan → cmd+z", flush=True)
+            _push_vision_event("🖖🖖 → undo")
             try:
                 _fire_hotkey("cmd+z")
-                _toast("Wonder", "🖖 undone")
+                _toast("Wonder", "🖖🖖 undone")
                 _play_sound("Blow")
             except Exception as e:
                 print(f"[viewer] vulcan undo failed: {e}", flush=True)
+        # 👍👍 Two-hand thumbs-up → Cmd+Shift+Z redo.
+        if (_vulcan_undo_enabled and _system_enabled
+                and _detect_two_hand_thumbs(hands_for_cursor, now)):
+            print("[viewer] 👍👍 two-hand thumbs → cmd+shift+z", flush=True)
+            _push_vision_event("👍👍 → redo")
+            try:
+                _fire_hotkey("cmd+shift+z")
+                _toast("Wonder", "👍👍 redone")
+                _play_sound("Ping")
+            except Exception as e:
+                print(f"[viewer] thumbs redo failed: {e}", flush=True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
