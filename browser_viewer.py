@@ -6662,7 +6662,8 @@ _stillness_last_click_at: float = 0.0
 
 # --- Experimental toggles (off by default) ---
 # T-gesture = timeout: make a T with both hands to toggle master on/off.
-_t_timeout_enabled: bool = True
+_t_timeout_enabled: bool = False   # user disabled — Ctrl+Option+W is the
+                                    # canonical master toggle instead
 _t_gesture_armed: bool = True
 _t_last_trigger_at: float = 0.0
 T_GESTURE_COOLDOWN_S: float = 1.2
@@ -9755,7 +9756,7 @@ def _play_sound(name: str = "Glass") -> None:
         try:
             path = f"/System/Library/Sounds/{name}.aiff"
             subprocess.run(
-                ["afplay", "-v", "0.7", path],
+                ["afplay", "-v", "0.35", path],
                 check=False, timeout=4.0,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
