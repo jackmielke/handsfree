@@ -12278,6 +12278,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "dictMode": _dict_mode,
                         "voiceDaemon": _voice_enabled,
                         "voiceState": _voice_state,
+                        "v2Armed": _v2_command_mode,
                         "voiceLastText": _voice_last_text,
                         "voiceLastResult": _voice_last_result,
                         "voiceErr": _voice_err,

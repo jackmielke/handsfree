@@ -1,4 +1,6 @@
 .venv/
+reachy_env/
+.env
 __pycache__/
 *.pyc
 face_landmarker.task
