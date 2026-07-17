@@ -576,6 +576,102 @@ def _try_power_voice(text: str) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- #
+# Karaoke: "karaoke time" → Vibey writes an original song on the spot, bakes
+# its own TTS vocals INTO a synthesized backing track (one speaker channel =
+# vocals must be pre-mixed), leaves an instrumental gap for the human verse,
+# and performs the whole thing while dancing.
+# --------------------------------------------------------------------------- #
+_KARAOKE_RE = re.compile(r"\b(karaoke( time)?|sing (with|for) (me|us)|let'?s sing)\b", re.I)
+
+
+def _mp3_to_pcm22050(mp3: bytes) -> "np.ndarray":
+    import subprocess
+    r = subprocess.run(
+        ["ffmpeg", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le",
+         "-ar", "22050", "-ac", "1", "pipe:1"],
+        input=mp3, capture_output=True, timeout=60)
+    return np.frombuffer(r.stdout, dtype="<i2").astype(np.float32) / 32768.0
+
+
+def _perform_karaoke() -> None:
+    from reachy_emotes import _backing_track, play_dance
+    import struct as _struct
+    import wave as _wave
+    import io as _io
+    try:
+        lyrics = _haiku(
+            "Write a tiny original fun song for a robot named Vibey to sing "
+            "to its human, Jack, at home. Exactly 4 short lines for VERSE, "
+            "then exactly 2 short lines for CHORUS. Playful, singable, "
+            "rhyming. Format:\nVERSE:\n<4 lines>\nCHORUS:\n<2 lines>", 40)
+        verse, chorus, mode = [], [], None
+        for ln in lyrics.splitlines():
+            s = ln.strip()
+            if s.upper().startswith("VERSE"):
+                mode = "v"
+            elif s.upper().startswith("CHORUS"):
+                mode = "c"
+            elif s and mode == "v":
+                verse.append(s)
+            elif s and mode == "c":
+                chorus.append(s)
+        if not verse:
+            verse = ["I'm a little robot with a camera eye",
+                     "I wiggle my antennas when you walk by",
+                     "I learned to sing while you were asleep",
+                     "so here's a little song for you to keep"]
+        if not chorus:
+            chorus = ["Vibey and Jack, the best of friends",
+                      "this is the song that never ends"]
+
+        from reachy_voice import tts
+        v_audio = _mp3_to_pcm22050(tts(" ... ".join(verse)))
+        cue_audio = _mp3_to_pcm22050(tts("Your verse — take it away, Jack!"))
+        c_audio = _mp3_to_pcm22050(tts(" ... ".join(chorus) + " ... one more time! ... "
+                                       + " ... ".join(chorus)))
+
+        SR22 = 22050
+        v_at, cue_at = 3.0, None
+        cue_at = 3.0 + len(v_audio) / SR22 + 1.0
+        human_gap = 14.0
+        c_at = cue_at + len(cue_audio) / SR22 + human_gap
+        total_s = c_at + len(c_audio) / SR22 + 3.0
+
+        backing_wav = _backing_track(total_s)
+        with _wave.open(_io.BytesIO(backing_wav)) as w:
+            back = np.frombuffer(w.readframes(w.getnframes()),
+                                 dtype="<i2").astype(np.float32) / 32768.0
+        mix = back * 0.55
+        for seg, at in ((v_audio, v_at), (cue_audio, cue_at), (c_audio, c_at)):
+            i = int(at * SR22)
+            mix[i:i + len(seg)] += seg[:max(0, len(mix) - i)] * 1.0
+        mix = np.clip(mix, -1, 1)
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR22)
+            w.writeframes((mix * 32767).astype("<i2").tobytes())
+
+        name = f"karaoke_{int(time.time())}.wav"
+        upload_sound(buf.getvalue(), name)
+        play_sound(name)
+        MUTED_EXT["until"] = time.time() + total_s + 2.0
+        play_dance(min(total_s, 30.0))
+        print(f"[karaoke] performing {total_s:.0f}s song", flush=True)
+    except Exception as e:
+        print(f"[karaoke] failed: {e}", flush=True)
+        _speak_line("My karaoke machine jammed — try again in a minute!")
+
+
+def _try_karaoke(text: str) -> bool:
+    if not _KARAOKE_RE.search(text):
+        return False
+    _log_turn("you", text)
+    _log_turn("wonder", "(karaoke time! 🎤 writing a song…)")
+    threading.Thread(target=_perform_karaoke, daemon=True).start()
+    return True
+
+
 def _try_resay(text: str) -> bool:
     """If `text` is a re-say request, replay the last line. True if handled."""
     if not _RESAY_RE.search(text):
@@ -602,6 +698,8 @@ def _typed_turn(text: str) -> None:
     if _try_resay(text):
         return LAST_SPOKEN["text"]
     if _try_game(text):
+        return LAST_SPOKEN["text"]
+    if _try_karaoke(text):
         return LAST_SPOKEN["text"]
     if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return LAST_SPOKEN["text"]
@@ -1053,6 +1151,8 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
         return muted_until
     if _try_game(text):
         return muted_until
+    if _try_karaoke(text):
+        return muted_until
     if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return muted_until
     if _check_think_aloud_toggle(text):
@@ -1097,6 +1197,8 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
     if _try_resay(text):
         return muted_until
     if _try_game(text):
+        return muted_until
+    if _try_karaoke(text):
         return muted_until
     if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return muted_until

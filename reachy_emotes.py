@@ -308,6 +308,64 @@ def play_dance(seconds: float = 12.0) -> None:
     threading.Thread(target=dance, args=(seconds,), daemon=True).start()
 
 
+# --------------------------------------------------------------------------- #
+# Karaoke mode — an original synthesized backing track with a call-and-
+# response structure. Lyrics come from the caller (usually haiku-written on
+# the spot); Vibey performs verse 1, hands verse 2 to the human, then a big
+# shared chorus and a victory finish.
+# --------------------------------------------------------------------------- #
+def _backing_track(seconds: float = 40.0, bpm: int = 100) -> bytes:
+    """Kick + bassline + sparkly arpeggio, loops until `seconds`."""
+    spb = 60.0 / bpm
+    total = int(SR * seconds)
+    buf = [0.0] * total
+
+    def mix(samples, at_s):
+        start = int(at_s * SR)
+        for i, s in enumerate(samples):
+            j = start + i
+            if j < total:
+                buf[j] += s
+
+    bass_line = [131, 131, 165, 196]           # C3 C3 E3 G3
+    arp = [523, 659, 784, 1046]                # C5 E5 G5 C6
+    t = 0.0
+    bar = 0
+    while t < seconds:
+        mix(_sweep(150, 48, 0.12, 0.8), t)                       # kick
+        mix(_sweep(bass_line[bar % 4], bass_line[bar % 4] * 0.99,
+                   spb * 0.9, 0.28), t)                          # bass
+        if bar % 2 == 1:
+            mix(_sweep(900, 880, 0.05, 0.12), t + spb / 2)       # offbeat tick
+        for k, f in enumerate(arp):
+            mix(_sweep(f, f, 0.09, 0.10), t + k * spb / 4)       # sparkle
+        t += spb
+        bar += 1
+    return _to_wav([max(-1, min(1, s)) for s in buf])
+
+
+def start_karaoke_track(seconds: float = 40.0) -> float:
+    """Upload (once) + start the backing track. Returns its duration."""
+    name = "wonder_sfx_karaoke.wav"
+    with _upload_lock:
+        if "karaoke" not in _uploaded:
+            wav = _backing_track(seconds)
+            boundary = f"----emote{uuid.uuid4().hex}"
+            payload = ((f"--{boundary}\r\nContent-Disposition: form-data; "
+                        f'name="file"; filename="{name}"\r\n'
+                        f"Content-Type: audio/wav\r\n\r\n").encode()
+                       + wav + f"\r\n--{boundary}--\r\n".encode())
+            req = urllib.request.Request(
+                f"{REACHY_URL}/api/media/sounds/upload", data=payload,
+                method="POST",
+                headers={"Content-Type":
+                         f"multipart/form-data; boundary={boundary}"})
+            urllib.request.urlopen(req, timeout=20).read()
+            _uploaded.add("karaoke")
+    _post("/api/media/play_sound", {"file": name})
+    return seconds
+
+
 if __name__ == "__main__":
     import sys
     emotion = sys.argv[1] if len(sys.argv) > 1 else "happy"

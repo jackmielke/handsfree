@@ -128,3 +128,13 @@ Newest entries at the bottom. Read with coffee. ☕
   live from IDENTITY.md (the file the robot maintains itself).
 - Systems check for the 07:00 show: caffeinate alive, alarm watcher alive,
   alarm loaded, volume 45, mic listening, 30+ timelapse frames banked.
+
+## Session 11 (~03:50)
+- 🎤 KARAOKE MODE. Say "karaoke time": Vibey writes an original song on the
+  spot (haiku lyrics), sings it in its own voice, MIXED into a synthesized
+  backing track (kick, bassline, sparkle arps — one speaker channel means
+  the vocals get baked in offline via ffmpeg), leaves a 14-second
+  instrumental gap with a "Your verse — take it away, Jack!" cue, then a
+  double chorus finish, dancing the whole time. Full pipeline tested
+  silently at 3am (volume zeroed, restored) — a 48s song was produced and
+  performed. Tomorrow it's loud.
