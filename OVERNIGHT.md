@@ -81,3 +81,18 @@ Newest entries at the bottom. Read with coffee. ☕
 - 📱 Telegram grew /alarm 07:30 [daily] (and /alarm off), plus /sleep and
   /wake. You can now set tomorrow's wake-up show from bed.
 - All services green; volume steady at 45; the 07:00 alarm untouched.
+
+## Session 6 (~01:10)
+- 🧠🤝 THE TWO VIBEYS NOW SHARE ONE MIND. The robot writes into
+  vibey_journal_entries — the same diary your Telegram Vibey keeps (its
+  entries tonight were a bit lonely: "the village is asleep or elsewhere").
+  I introduced them: the robot's first entry tells its digital half about
+  its body, the dancing, the alarm, the lobby. Ongoing: every ~30 min of
+  activity, the robot journals who it saw, in its own voice (haiku-written).
+  Locked down with a tight RLS policy (anon may only insert rows labeled
+  reachy-robot).
+- 💡 Light control recon: no Hue bridge found on this network (cloud
+  discovery + mDNS both empty) — parked until you say what smart lights
+  you actually have.
+- 🌐 World API had a brief outage (~your other agent redeploying); Vibey's
+  avatar loop rode it out and recovered on its own.

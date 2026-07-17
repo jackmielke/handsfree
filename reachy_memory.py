@@ -347,6 +347,65 @@ def best_match(embedding: list[float], samples: list[dict]):
 
 
 # --------------------------------------------------------------------------- #
+# Shared journal: every ~30 min with activity, the robot writes a short
+# first-person entry into vibey_journal_entries — the same diary the
+# Telegram Vibey keeps — so both Vibeys share one memory. Rows are tagged
+# source_summary='reachy-robot' (that's what the RLS policy allows).
+# --------------------------------------------------------------------------- #
+JOURNAL_COMMUNITY = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+JOURNAL_EVERY_S = 1800.0
+_journal = {"last": time.time(), "people": set(), "count": 0}
+
+
+def _journal_note(name: str | None) -> None:
+    if name:
+        _journal["people"].add(name)
+    _journal["count"] += 1
+
+
+def _journal_flush() -> None:
+    if time.time() - _journal["last"] < JOURNAL_EVERY_S:
+        return
+    if _journal["count"] == 0:
+        _journal["last"] = time.time()
+        return
+    people = ", ".join(sorted(_journal["people"])) or "someone I don't know yet"
+    facts = (f"In the last half hour my camera saw {_journal['count']} "
+             f"face sightings. People recognized: {people}.")
+    body = None
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["claude", "-p", "--model", "haiku",
+             "You are Vibey, a small physical robot writing one short "
+             "first-person journal paragraph (2-3 sentences, warm, a little "
+             "wry, no markdown) about your last half hour. Facts: " + facts],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            body = r.stdout.strip()[:600]
+    except Exception:
+        pass
+    if not body:
+        body = f"Robot log: {facts}"
+    try:
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/rest/v1/vibey_journal_entries",
+            data=json.dumps({
+                "community_id": JOURNAL_COMMUNITY,
+                "source_summary": "reachy-robot",
+                "body": body,
+                "message_count": _journal["count"],
+            }).encode(),
+            method="POST",
+            headers=_sb_headers({"Prefer": "return=minimal"}))
+        urllib.request.urlopen(req, timeout=10).read()
+        print(f"[memory] journaled: {body[:80]!r}", flush=True)
+    except Exception as e:
+        print(f"[memory] journal failed: {e}", flush=True)
+    _journal.update({"last": time.time(), "people": set(), "count": 0})
+
+
+# --------------------------------------------------------------------------- #
 # Conversation starters: if someone's been hanging out in frame for a while
 # with no chat happening, Vibey says something curious. Heavily rate-limited,
 # daytime only (08:00-22:00), and off entirely while chat is muted.
@@ -670,6 +729,7 @@ def run():
         if not faces:
             _set_current_people([])
             _maybe_start_conversation(False)
+            _journal_flush()
             continue
 
         try:
@@ -730,6 +790,9 @@ def run():
                     print(f"[memory] supabase insert failed: {e}", flush=True)
 
         _set_current_people(seen_now)
+        for p in seen_now:
+            _journal_note(p.get("name"))
+        _journal_flush()
         _maybe_glance(faces)
         _maybe_start_conversation(bool(faces))
 
