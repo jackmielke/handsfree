@@ -62,3 +62,13 @@ Newest entries at the bottom. Read with coffee. ☕
   to-do #2: enable it, stand to one side, talk, and tell Claude if Vibey
   looks toward or away from you (DOA_SIGN flips it).**
 - Mic confirmed alive after all restarts; 07:00 alarm intact.
+
+## Session 4 (~00:10)
+- 🌐 The dashboard grew a VibeVerse panel: who's in the lobby with Vibey,
+  a live event feed (greetings, mentions, its own lines), and a jump link
+  to visit. No more tailing logs to know what your robot is up to online.
+- 💬 Conversation starters: if someone hangs out in frame for 5+ quiet
+  minutes, Vibey pipes up with something curious ("what should I learn this
+  week?"). Strictly daytime (08:00–22:00), max once per half hour, never
+  while muted — so it's charming, not clingy.
+- Volume held at 45 all session (watchdog quiet); mic alive; alarm intact.

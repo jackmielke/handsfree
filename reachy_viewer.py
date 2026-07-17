@@ -434,6 +434,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <h2>🧠 Vibey's head <span class=sub style="display:inline;margin-left:6px">OpenClaw agent — thinking, tool calls, code edits</span></h2>
     <div id=brainlog class=brainlog><div class=brainlog-empty>Turn on 🎮 Vibe mode and talk to it — its thought process streams here.</div></div>
   </div>
+  <div class="panel full">
+    <h2>🌐 VibeVerse <span class=sub style="display:inline;margin-left:6px">Vibey's avatar on Edge Island · <a href="https://myvibeverse.com/city?spawn=island" target=_blank style="color:var(--accent)">visit</a></span></h2>
+    <div class=kv><span>In lobby with</span><b id=versewho>—</b></div>
+    <div id=verselog class=brainlog style="max-height:170px;margin-top:10px"></div>
+  </div>
   <div class=panel>
     <h2>Body · handsfree</h2>
     <div class=kv><span>Head pose (r/p/y)</span><b class=mono id=pose>—</b></div>
@@ -1027,6 +1032,31 @@ async function fetchBrain(){
   }catch(_){}
 }
 setInterval(fetchBrain,2500);fetchBrain();
+
+// ---- VibeVerse lobby panel ----
+let verseLen=-1;
+async function fetchVerse(){
+  try{
+    const d=await(await fetch('/verselog')).json();
+    $('versewho').textContent=(d.agents&&d.agents.length)?d.agents.join(', '):'nobody else right now';
+    const ev=d.events||[];
+    if(ev.length===verseLen)return;
+    verseLen=ev.length;
+    const b=$('verselog');
+    const stick=b.scrollTop+b.clientHeight>=b.scrollHeight-40;
+    b.innerHTML='';
+    if(!ev.length){b.innerHTML='<div class=brainlog-empty>lobby is quiet…</div>';return;}
+    for(const e of ev.slice(-30)){
+      const row=document.createElement('div');
+      row.className='bl '+(e.kind==='mention'?'user':e.kind==='say'?'say':'result');
+      const tag=document.createElement('span');tag.className='tag';tag.textContent=e.kind;
+      const tx=document.createElement('span');tx.className='tx';tx.textContent=e.text;
+      row.appendChild(tag);row.appendChild(tx);b.appendChild(row);
+    }
+    if(stick)b.scrollTop=b.scrollHeight;
+  }catch(_){}
+}
+setInterval(fetchVerse,5000);fetchVerse();
 </script></body></html>"""
 
 
@@ -1059,6 +1089,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/knownnames"):
             self._send(json.dumps(
                 _get(f"{MEM_URL}/names", timeout=8.0) or []
+            ).encode(), "application/json")
+        elif self.path.startswith("/verselog"):
+            self._send(json.dumps(
+                _get("http://localhost:8774/status", timeout=4.0) or {}
             ).encode(), "application/json")
         elif self.path.startswith("/vibelog"):
             self._send(json.dumps(

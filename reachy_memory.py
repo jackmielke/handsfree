@@ -347,6 +347,68 @@ def best_match(embedding: list[float], samples: list[dict]):
 
 
 # --------------------------------------------------------------------------- #
+# Conversation starters: if someone's been hanging out in frame for a while
+# with no chat happening, Vibey says something curious. Heavily rate-limited,
+# daytime only (08:00-22:00), and off entirely while chat is muted.
+# --------------------------------------------------------------------------- #
+STARTER_AFTER_S = 300.0       # someone visible this long with no chat
+STARTER_COOLDOWN_S = 1800.0   # at most one opener per half hour
+_starter = {"since": 0.0, "last": 0.0}
+
+STARTERS = [
+    "You know, I've been wondering — what's the best thing that happened to you today?",
+    "Quick question: if I could learn one new trick this week, what should it be?",
+    "I've been people-watching. It's fascinating. What are you working on?",
+    "Fun fact: I dream in JSON. What do you dream about?",
+    "Is it just me, or is this a very good moment for a dance break?",
+]
+
+
+def _maybe_start_conversation(any_face: bool) -> None:
+    import random
+    from datetime import datetime as _dt
+    now = time.time()
+    if not any_face:
+        _starter["since"] = 0.0
+        return
+    if _starter["since"] == 0.0:
+        _starter["since"] = now
+        return
+    hour = _dt.now().hour
+    if not (8 <= hour < 22):
+        return
+    if now - _starter["since"] < STARTER_AFTER_S:
+        return
+    if now - _starter["last"] < STARTER_COOLDOWN_S:
+        return
+    try:
+        req = urllib.request.Request("http://localhost:8772/state")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            st = json.loads(r.read())
+        if st.get("muted") or st.get("speaking"):
+            return
+        transcript = st.get("transcript") or []
+        last_chat = (transcript[-1]["ts"] / 1000) if transcript else 0
+        if now - last_chat < STARTER_AFTER_S:
+            return
+    except Exception:
+        return
+    _starter["last"] = now
+    _starter["since"] = now
+    line = random.choice(STARTERS)
+    print(f"[memory] conversation starter: {line!r}", flush=True)
+    try:
+        from reachy_emotes import play as _pe
+        _pe("curious")
+    except Exception:
+        pass
+    try:
+        say(line)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Look-at-speaker (EXPERIMENTAL — set LOOK_AT_SPEAKER=1 to enable).
 # When the mics detect speech and we can see faces, nudge the head toward
 # the face nearest the sound direction. DOA sign/offset conventions need a
@@ -607,6 +669,7 @@ def run():
         faces = encode_faces(jpg)
         if not faces:
             _set_current_people([])
+            _maybe_start_conversation(False)
             continue
 
         try:
@@ -668,6 +731,7 @@ def run():
 
         _set_current_people(seen_now)
         _maybe_glance(faces)
+        _maybe_start_conversation(bool(faces))
 
         # Speak after processing every face this cycle, so two people walking
         # up together each get acknowledged instead of only the first.
