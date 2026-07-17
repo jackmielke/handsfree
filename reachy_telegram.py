@@ -3,7 +3,7 @@
 reachy_telegram.py — text Vibey from anywhere (@vibey_ai_bot).
 
 A stdlib-only Telegram bridge:
-- Messages go through whichever brain is active (Wonder/fast/🎮 Vibe) via the
+- Messages go through whichever brain is active (Vibey/fast/🎮 Vibe agent) via the
   chat service's /ask — the reply comes back in Telegram AND is spoken aloud
   on the robot, so texting it makes the robot talk in the room.
 - `say: something` speaks the text verbatim on the robot.

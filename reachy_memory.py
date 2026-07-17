@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-reachy_memory.py — Wonder remembers faces (Supabase-backed).
+reachy_memory.py — Vibey remembers faces (Supabase-backed).
 
 Polls the camera on a fixed interval, detects *every* face in frame (not just
-one), and checks each against everyone Wonder already knows — so two people
+one), and checks each against everyone Vibey already knows — so two people
 in view get recognized simultaneously. Returning people get greeted by name in
 Wonder's voice; new people get added to memory.
 

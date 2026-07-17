@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-reachy_chat.py — voice-to-voice conversation with Wonder.
+reachy_chat.py — voice-to-voice conversation with Vibey.
 
 You talk (laptop mic) → faster-whisper transcribes → Claude thinks up a short
-reply in Wonder's persona → ElevenLabs renders it in Wonder's voice → it plays
-from the robot's speaker. The mic is muted while Wonder speaks so it doesn't
+reply in Vibey's persona → ElevenLabs renders it in Vibey's voice → it plays
+from the robot's speaker. The mic is muted while Vibey speaks so it doesn't
 hear itself.
 
 Run in the handsfree venv (has sounddevice + faster-whisper + anthropic):
@@ -272,8 +272,11 @@ def _try_dance(text: str) -> bool:
 # game is on is treated as an answer. Scores are per-person when face memory
 # recognizes who's in frame. "stop the game" ends it with a victory dance.
 # --------------------------------------------------------------------------- #
-GAME = {"on": False, "round": 0, "max_rounds": 5, "q": None, "a": None,
-        "attempts": 0, "scores": {}}
+GAME = {"on": False, "kind": "trivia", "round": 0, "max_rounds": 5,
+        "q": None, "a": None, "attempts": 0, "scores": {}, "secret": None,
+        "questions_used": 0}
+_20Q_START_RE = re.compile(r"\b(twenty|20) questions\b", re.I)
+_20Q_GIVEUP_RE = re.compile(r"\b(i give up|we give up|tell (me|us) the answer)\b", re.I)
 _GAME_START_RE = re.compile(r"\b(play trivia|trivia time|let'?s play (a game|trivia)|start (a )?trivia)\b", re.I)
 _GAME_STOP_RE = re.compile(r"\b(stop|end|quit) the game\b|\bgame over\b", re.I)
 
@@ -323,7 +326,62 @@ def _game_scoreboard() -> str:
 
 
 def _try_game(text: str) -> bool:
-    """Trivia state machine. Returns True if the utterance was game business."""
+    """Game state machine (trivia + 20 questions). True if game business."""
+    if _20Q_START_RE.search(text) and not GAME["on"]:
+        secret = _haiku(
+            "Pick ONE well-known thing for a game of 20 questions — an "
+            "animal, object, food, or famous character. Not too obscure. "
+            "Reply with ONLY the thing, 1-3 words.").splitlines()
+        GAME.update({"on": True, "kind": "20q", "questions_used": 0,
+                     "secret": (secret[-1].strip() if secret else "a penguin")})
+        _log_turn("you", text)
+        line = ("Twenty questions! I'm thinking of something. "
+                "Yes-or-no questions only — go!")
+        _log_turn("wonder", line)
+        try:
+            from reachy_emotes import play as _pe
+            _pe("smug")
+        except Exception:
+            pass
+        _speak_line(line)
+        return True
+    if GAME["on"] and GAME.get("kind") == "20q":
+        _log_turn("you", text)
+        if _GAME_STOP_RE.search(text) or _20Q_GIVEUP_RE.search(text):
+            GAME["on"] = False
+            line = f"It was {GAME['secret']}! Good game."
+            _log_turn("wonder", line)
+            _speak_line(line)
+            return True
+        verdict = _haiku(
+            f"20 questions. My secret is {GAME['secret']!r}. The player "
+            f"said: {text!r}. If they are guessing the secret itself and are "
+            f"right (or extremely close), reply WIN. Otherwise answer their "
+            f"yes/no question about the secret with exactly YES, NO, or "
+            f"SORT OF.").upper()
+        GAME["questions_used"] += 1
+        left = 20 - GAME["questions_used"]
+        if "WIN" in verdict:
+            GAME["on"] = False
+            who = _player_name()
+            line = (f"Yes! {who} got it — it was {GAME['secret']}! "
+                    f"In {GAME['questions_used']} questions.")
+            try:
+                from reachy_emotes import play as _pe
+                _pe("victory", sound=True)
+            except Exception:
+                pass
+            time.sleep(1.2)
+        elif GAME["questions_used"] >= 20:
+            GAME["on"] = False
+            line = f"That's twenty! You didn't get it — it was {GAME['secret']}!"
+        else:
+            ans = "Sort of" if "SORT" in verdict else \
+                ("Yes" if "YES" in verdict else "No")
+            line = f"{ans}. {left} questions left."
+        _log_turn("wonder", line)
+        _speak_line(line)
+        return True
     if _GAME_START_RE.search(text) and not GAME["on"]:
         GAME.update({"on": True, "round": 1, "attempts": 0, "scores": {}})
         GAME["q"], GAME["a"] = _new_question()
@@ -817,10 +875,10 @@ class Brain:
     def _cli_reply(self) -> str:
         # Bake persona + short history into one prompt; fresh CLI call per turn.
         convo = "\n".join(
-            f"{'Human' if m['role'] == 'user' else 'Wonder'}: {m['content']}"
+            f"{'Human' if m['role'] == 'user' else 'Vibey'}: {m['content']}"
             for m in self.history)
         prompt = (f"{self._persona()}\n\nConversation so far:\n{convo}\n\n"
-                  f"Reply as Wonder with ONLY the spoken sentence(s), nothing else.")
+                  f"Reply as Vibey with ONLY the spoken sentence(s), nothing else.")
         r = subprocess.run(["claude", "-p", "--model", MODEL, prompt],
                            capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
@@ -1024,7 +1082,7 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
 
 def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
     """Whisper transcription → OpenClaw 'vibe' agent (agentic, can edit its
-    own code) → ElevenLabs TTS. Slow but powerful; Wonder acks first so the
+    own code) → ElevenLabs TTS. Slow but powerful; Vibey acks first so the
     silence while Vibe works doesn't feel like a crash."""
     t0 = time.time()
     text = transcribe(audio)
@@ -1132,7 +1190,7 @@ def main():
         effective_muted_until = max(muted_until, MUTED_EXT["until"])
         STATE["speaking"] = now < effective_muted_until
         STATE["listening"] = not STATE["speaking"] and not STATE["muted"]
-        if now < effective_muted_until or STATE["muted"]:  # Wonder talking, or user muted
+        if now < effective_muted_until or STATE["muted"]:  # Vibey talking, or user muted
             pre_roll.clear(); buf = []; in_speech = False
             continue
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-reachy_voice.py — give Wonder a voice (ElevenLabs → the robot's own speaker).
+reachy_voice.py — give Vibey a voice (ElevenLabs → the robot's own speaker).
 
 Text goes to ElevenLabs TTS, the resulting MP3 is uploaded to the Reachy daemon,
-and played on the robot's speaker — so the sound comes out of Wonder's body, not
+and played on the robot's speaker — so the sound comes out of Vibey's body, not
 your laptop. Stdlib only; no SDK/venv required.
 
 CLI:

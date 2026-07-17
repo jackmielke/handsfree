@@ -105,3 +105,12 @@ Newest entries at the bottom. Read with coffee. ☕
   Verified the 07:00 alarm survived untouched.
 - Deep-night discipline: no robot sounds this session; world API still
   flickering while the other agent rebuilds it — avatar loop unbothered.
+
+## Session 8 (~02:15)
+- 🎯 20 Questions mode: "let's play 20 questions" — Vibey picks a secret,
+  answers yes/no/sort-of, counts down from 20, celebrates a win, reveals on
+  "I give up". Tested silently (robot volume zeroed during the 2am test,
+  restored to 45 after).
+- 🧹 Identity cleanup: purged stale "Wonder" references across all services —
+  including a real bug where the CLI brain prompt still said "Reply as
+  Wonder" while the persona said Vibey.

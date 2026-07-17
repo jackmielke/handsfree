@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-reachy_camera.py — stream Wonder's camera to your laptop as MJPEG.
+reachy_camera.py — stream Vibey's camera to your laptop as MJPEG.
 
 The Reachy daemon only shares camera frames over WebRTC (not plain HTTP), so a
 browser can't display them directly. This bridges that gap: it connects to the

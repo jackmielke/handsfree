@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-reachy_emotes.py — Wonder's emotional vocabulary: 5 emotes, motion + sound.
+reachy_emotes.py — Vibey's emotional vocabulary: 5 emotes, motion + sound.
 
 Each emote is a short head/antenna choreography (via the daemon's /move/goto)
 plus a matching R2-style chirp. The chirps are synthesized right here (sine
@@ -15,7 +15,7 @@ no audio assets to download or commit.
 
 Use as a module (non-blocking):
     from reachy_emotes import play
-    play("happy")                # motion only (safe while Wonder is speaking)
+    play("happy")                # motion only (safe while Vibey is speaking)
     play("happy", sound=True)    # motion + chirp
 
 Or from the CLI:
