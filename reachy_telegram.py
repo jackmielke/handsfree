@@ -108,6 +108,40 @@ def _send_video(chat_id: int, mp4: bytes, caption: str) -> None:
     urllib.request.urlopen(req, timeout=60).read()
 
 
+def _send_voice_note(chat_id: int, text: str) -> bool:
+    """Speak the reply INTO TELEGRAM as a voice note (does not play in the
+    room): ElevenLabs mp3 → ogg/opus via ffmpeg → sendVoice."""
+    import subprocess
+    import tempfile
+    try:
+        from reachy_voice import tts
+        mp3 = tts(text[:600])
+        with tempfile.TemporaryDirectory() as tmp:
+            src_p, ogg_p = os.path.join(tmp, "v.mp3"), os.path.join(tmp, "v.ogg")
+            open(src_p, "wb").write(mp3)
+            r = subprocess.run(["ffmpeg", "-y", "-i", src_p, "-c:a", "libopus",
+                                "-b:a", "32k", ogg_p],
+                               capture_output=True, timeout=60)
+            if r.returncode != 0:
+                return False
+            ogg = open(ogg_p, "rb").read()
+        boundary = f"----tg{uuid.uuid4().hex}"
+        parts = [f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f'name="chat_id"\r\n\r\n{chat_id}\r\n'.encode()]
+        parts.append((f"--{boundary}\r\nContent-Disposition: form-data; "
+                      f'name="voice"; filename="vibey.ogg"\r\n'
+                      f"Content-Type: audio/ogg\r\n\r\n").encode())
+        body = b"".join(parts) + ogg + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"{API}/sendVoice", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        urllib.request.urlopen(req, timeout=60).read()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[tg] voice note failed: {e}", flush=True)
+        return False
+
+
 def _post_json(url: str, body: dict, timeout: float = 300.0):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"},
@@ -137,6 +171,7 @@ def _handle(chat_id: int, text: str) -> None:
               "/status — stack health\n"
               "/alarm 07:30 [daily] — wake-up show (/alarm off clears)\n"
               "/sleep, /wake — power the robot down or up\n"
+              "/voicenotes on|off — replies as voice messages too\n"
               "/verse — what's happening in my VibeVerse lobby")
         return
     if low == "/photo":
@@ -214,6 +249,12 @@ def _handle(chat_id: int, text: str) -> None:
             or "quiet so far"
         _send(chat_id, body)
         return
+    if low.startswith("/voicenotes"):
+        st = _state()
+        st["voice_notes"] = "off" not in low
+        _save_state(st)
+        _send(chat_id, "voice notes " + ("ON — replies come as audio too" if st["voice_notes"] else "off"))
+        return
     if low.startswith("say:"):
         line = text[4:].strip()
         try:
@@ -227,6 +268,8 @@ def _handle(chat_id: int, text: str) -> None:
         out = _post_json(f"{CHAT_URL}/ask", {"text": text})
         reply = (out or {}).get("reply") or "(no reply)"
         _send(chat_id, reply)
+        if _state().get("voice_notes") and reply and not reply.startswith("("):
+            _send_voice_note(chat_id, reply)
     except Exception as e:  # noqa: BLE001
         _send(chat_id, f"brain hiccup ({e}) — is the chat service up?")
 

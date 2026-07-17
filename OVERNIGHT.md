@@ -96,3 +96,12 @@ Newest entries at the bottom. Read with coffee. ☕
   you actually have.
 - 🌐 World API had a brief outage (~your other agent redeploying); Vibey's
   avatar loop rode it out and recovered on its own.
+
+## Session 7 (~01:45)
+- 🎙️ Telegram voice notes: /voicenotes on → chat replies also arrive as
+  voice messages in Vibey's actual voice (TTS → opus, no sound in the room).
+- ⏰ Dashboard alarm editor: see, add (time + once/daily), and delete
+  wake-up shows right on the dashboard — no more editing alarms.json.
+  Verified the 07:00 alarm survived untouched.
+- Deep-night discipline: no robot sounds this session; world API still
+  flickering while the other agent rebuilds it — avatar loop unbothered.

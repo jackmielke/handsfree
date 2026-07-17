@@ -434,6 +434,21 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <h2>🧠 Vibey's head <span class=sub style="display:inline;margin-left:6px">OpenClaw agent — thinking, tool calls, code edits</span></h2>
     <div id=brainlog class=brainlog><div class=brainlog-empty>Turn on 🎮 Vibe mode and talk to it — its thought process streams here.</div></div>
   </div>
+  <div class=panel>
+    <h2>⏰ Alarms <span class=sub style="display:inline;margin-left:6px">wake-up shows</span></h2>
+    <div id=alarmlist style="display:flex;flex-direction:column;gap:6px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <input id=alarmtime type=time value="07:00"
+        style="background:#0a0b10;border:1px solid var(--line);border-radius:10px;
+               padding:8px 10px;color:var(--txt);font:inherit;outline:none">
+      <select id=alarmrepeat
+        style="background:#0a0b10;border:1px solid var(--line);border-radius:10px;
+               padding:8px 10px;color:var(--txt);font:inherit;outline:none">
+        <option value=once>once</option><option value=daily>daily</option>
+      </select>
+      <button id=alarmadd class=cap-btn>＋ Add</button>
+    </div>
+  </div>
   <div class="panel full">
     <h2>🌐 VibeVerse <span class=sub style="display:inline;margin-left:6px">Vibey's avatar on Edge Island · <a href="https://myvibeverse.com/city?spawn=island" target=_blank style="color:var(--accent)">visit</a></span></h2>
     <div class=kv><span>In lobby with</span><b id=versewho>—</b></div>
@@ -1057,6 +1072,38 @@ async function fetchVerse(){
   }catch(_){}
 }
 setInterval(fetchVerse,5000);fetchVerse();
+
+// ---- alarm editor ----
+let ALARMS=[];
+async function fetchAlarms(){
+  try{
+    ALARMS=await(await fetch('/alarms')).json();
+    const box=$('alarmlist'); box.innerHTML='';
+    if(!ALARMS.length){box.innerHTML='<div class=sub style=margin:0>no alarms set</div>';}
+    ALARMS.forEach((a,i)=>{
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;gap:8px';
+      row.innerHTML='<b class=mono>'+a.time+'</b><span class=sub style=margin:0>'+(a.repeat||'once')+'</span><span style=flex:1></span>';
+      const del=document.createElement('button');
+      del.className='person-del'; del.style.position='static'; del.textContent='×';
+      del.onclick=async()=>{
+        ALARMS.splice(i,1);
+        await fetch('/setalarms',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(ALARMS)});
+        fetchAlarms();
+      };
+      row.appendChild(del); box.appendChild(row);
+    });
+  }catch(_){}
+}
+$('alarmadd').onclick=async()=>{
+  const t=$('alarmtime').value; if(!t)return;
+  ALARMS.push({time:t,repeat:$('alarmrepeat').value,label:'dashboard alarm '+t,song:true});
+  await fetch('/setalarms',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(ALARMS)});
+  fetchAlarms();
+};
+setInterval(fetchAlarms,20000);fetchAlarms();
 </script></body></html>"""
 
 
@@ -1090,6 +1137,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(
                 _get(f"{MEM_URL}/names", timeout=8.0) or []
             ).encode(), "application/json")
+        elif self.path == "/alarms":
+            try:
+                alarms = json.loads(open(os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "alarms.json")).read())
+            except Exception:
+                alarms = []
+            self._send(json.dumps(alarms).encode(), "application/json")
         elif self.path.startswith("/verselog"):
             self._send(json.dumps(
                 _get("http://localhost:8774/status", timeout=4.0) or {}
@@ -1145,6 +1200,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(400)
                 self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        if self.path.startswith("/setalarms"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                alarms = json.loads(self.rfile.read(n))
+                assert isinstance(alarms, list)
+                for a in alarms:
+                    assert isinstance(a.get("time"), str) and ":" in a["time"]
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "alarms.json")
+                with open(path, "w") as f:
+                    json.dump(alarms, f, indent=2)
+                self._send(json.dumps({"ok": True, "count": len(alarms)}).encode(),
+                           "application/json")
+            except Exception as e:
+                self.send_response(400); self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
         if self.path.startswith("/capture"):
