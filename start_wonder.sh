@@ -25,6 +25,7 @@ stop_all() {
   pkill -f "reachy_vibeverse.py" 2>/dev/null
   pkill -f "reachy_telegram.py" 2>/dev/null
   pkill -f "reachy_bridge.py" 2>/dev/null
+  pkill -f "reachy_alarm.py" 2>/dev/null
   echo "wonder stack stopped."
 }
 
@@ -47,6 +48,8 @@ reachy_env/bin/python3 reachy_memory.py  > /tmp/reachy_memory.log 2>&1 &
 python3                reachy_vibeverse.py > /tmp/vibeverse.log     2>&1 &
 python3                reachy_telegram.py  > /tmp/telegram.log      2>&1 &
 NO_WAKE=1 python3      reachy_bridge.py    > /tmp/reachy_bridge.log 2>&1 &
+python3                reachy_alarm.py     > /tmp/reachy_alarm.log  2>&1 &
+pgrep -x caffeinate >/dev/null || (caffeinate -dims > /dev/null 2>&1 &)   # alarms need an awake Mac
 
 echo "starting… (camera takes ~10s to negotiate WebRTC)"
 sleep 12

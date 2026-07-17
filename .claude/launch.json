@@ -64,6 +64,14 @@
         "reachy_bridge.py"
       ],
       "port": 0
+    },
+    {
+      "name": "wonder-alarm",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "reachy_alarm.py"
+      ],
+      "port": 0
     }
   ]
 }
