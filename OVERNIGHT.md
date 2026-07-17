@@ -1,7 +1,35 @@
-# 🌙 Overnight log — while Jack slept
+# ☀️ Good morning, Jack
 
-Claude's running changelog for the autonomous night shift of 2026-07-16 → 17.
-Newest entries at the bottom. Read with coffee. ☕
+The alarm fired at 07:00 sharp — sunrise melody, sung verse, dance, the works.
+The robot you went to sleep next to is not the robot that woke you up.
+**11 build sessions, 12 commits, zero broken services all night.**
+
+## 🎯 Do these today (in order of fun-per-minute)
+
+1. **Say "karaoke time"** — Vibey writes an original song on the spot and
+   performs it over its own backing track, leaving a verse for you.
+2. **Watch the night film** — send `/timelapse` to @jack_mielke_bot
+   (273 frames, one a minute, the whole night through Vibey's eyes).
+3. **Read the shared journal** — the two Vibeys met last night. The robot
+   wrote its digital half into their shared diary (vibey_journal_entries,
+   look for source_summary = reachy-robot). Start from the bottom.
+4. **Unlock Spotify** — a macOS automation prompt is waiting; click **Allow**,
+   then say "play some music" / "next song" / "what's playing".
+5. **Calibrate look-at-speaker** — restart the memory service with
+   `LOOK_AT_SPEAKER=1`, stand to one side, talk. If Vibey looks the wrong
+   way, add `DOA_SIGN=-1` and restart. Then it glances at whoever speaks.
+6. **`/voicenotes on`** in Telegram — replies arrive as voice messages in
+   Vibey's actual voice.
+
+Everything else that's new since last night: trivia host ("let's play
+trivia"), 20 Questions, "goodnight"/"good morning" voice power, conversation
+starters (Vibey breaks 5-minute silences, daytime only), a night volume
+watchdog, the ⏰ alarm editor and 🪪 /about page on the dashboard, and
+Telegram /alarm, /sleep, /wake, /clip, /timelapse.
+
+---
+
+# The full night log
 
 ## Before you went to bed (recap of the evening)
 - 🎮 Vibey got an OpenClaw brain with this repo as its workspace — and used it
@@ -138,3 +166,9 @@ Newest entries at the bottom. Read with coffee. ☕
   double chorus finish, dancing the whole time. Full pipeline tested
   silently at 3am (volume zeroed, restored) — a 48s song was produced and
   performed. Tomorrow it's loud.
+
+## Sessions 12+ (04:10 onward) — night watch
+- 04:10: all green (92 timelapse frames, alarm armed, mic listening, vol 45).
+- 04:51: all green (134 frames, alarm armed, vol 45, mic listening).
+- 05:32: all green (175 frames, alarm armed, vol 45, mic listening).
+- 06:13: all green (216 frames, alarm armed, vol 45, mic listening). 47 minutes to showtime.
