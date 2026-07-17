@@ -45,3 +45,20 @@ Newest entries at the bottom. Read with coffee. ☕
   the victory chirp. Scores are per-person when face memory recognizes who's
   playing ("Correct! Point to Kai."). "Stop the game" ends with the
   scoreboard and a victory dance. Tested a full game end-to-end.
+
+## Session 3 (~23:40)
+- 🔉 Night volume watchdog: the robot kept resetting itself to 100; the alarm
+  service now clamps anything >50 back to 45 between 22:00–06:50 (and stands
+  down before the 07:00 alarm raises it on purpose).
+- 🎵 Music voice commands: "play some music", "pause", "next song", "what's
+  playing" → controls the Mac's Spotify. BLOCKED tonight by a pending macOS
+  automation-permission prompt (osascript hangs until you click Allow) — the
+  commands fail gracefully with a spoken hint. **Morning to-do #1: click
+  "Allow" when macOS asks about controlling Spotify, then say "play some
+  music".**
+- 👂→👀 Look-at-speaker scaffold: fuses mic direction (DOA) with seen faces
+  to glance at whoever's talking. Ships OFF (LOOK_AT_SPEAKER=1 to enable) —
+  the DOA sign/offset needs a live human to calibrate against. **Morning
+  to-do #2: enable it, stand to one side, talk, and tell Claude if Vibey
+  looks toward or away from you (DOA_SIGN flips it).**
+- Mic confirmed alive after all restarts; 07:00 alarm intact.

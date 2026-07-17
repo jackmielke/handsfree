@@ -160,9 +160,26 @@ def run() -> None:
           f"({len(_load_alarms())} alarm(s) set)", flush=True)
     fired_today: set[str] = set()
     last_day = datetime.now().strftime("%Y-%m-%d")
+    last_clamp = 0.0
     while True:
         time.sleep(15)
         now = datetime.now()
+        # Night volume watchdog: the daemon sometimes resets itself to 100.
+        # Between 22:00 and 06:50, clamp anything >50 back to 45 (the alarm
+        # raises volume itself when it fires).
+        if (now.hour >= 22 or now.hour < 7) and time.time() - last_clamp > 60:
+            if not (now.hour == 6 and now.minute >= 50):
+                last_clamp = time.time()
+                try:
+                    import urllib.request as _ur
+                    with _ur.urlopen(f"{REACHY_URL}/api/volume/current",
+                                     timeout=4) as r:
+                        vol = json.loads(r.read()).get("volume", 0)
+                    if vol > 50:
+                        _post("/api/volume/set", {"volume": 45})
+                        print(f"[alarm] night clamp: volume {vol} → 45", flush=True)
+                except Exception:
+                    pass
         day = now.strftime("%Y-%m-%d")
         if day != last_day:
             fired_today.clear()

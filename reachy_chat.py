@@ -394,6 +394,61 @@ def _try_game(text: str) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# Music: control the Mac's Spotify app by voice ("play some music", "pause",
+# "next song", "what's playing"). AppleScript via osascript with hard
+# timeouts — if macOS automation permission hasn't been granted yet, the
+# call is killed fast and Vibey says so instead of the mic loop hanging.
+# --------------------------------------------------------------------------- #
+_MUSIC_RE = re.compile(
+    r"\b(play (some )?music|pause( the)? music|stop( the)? music|resume( the)? music|"
+    r"next (song|track)|skip (this|the) (song|track)|previous (song|track)|"
+    r"what(\'s| is) (playing|this song))\b", re.I)
+
+
+def _osascript(script: str) -> str | None:
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=4)
+        if r.returncode != 0:
+            return None
+        return r.stdout.strip()
+    except Exception:
+        return None
+
+
+def _try_music(text: str) -> bool:
+    m = _MUSIC_RE.search(text)
+    if not m:
+        return False
+    low = text.lower()
+    _log_turn("you", text)
+    if "what" in low:
+        name = _osascript('tell application "Spotify" to name of current track as string')
+        artist = _osascript('tell application "Spotify" to artist of current track as string')
+        line = (f"This is {name} by {artist}." if name
+                else "I can't reach Spotify — check the automation permission.")
+    elif "pause" in low or "stop" in low:
+        ok = _osascript('tell application "Spotify" to pause')
+        line = "Music paused." if ok is not None else \
+            "Couldn't reach Spotify — check the automation permission."
+    elif "next" in low or "skip" in low:
+        ok = _osascript('tell application "Spotify" to next track')
+        line = "Skipping!" if ok is not None else \
+            "Couldn't reach Spotify — check the automation permission."
+    elif "previous" in low:
+        ok = _osascript('tell application "Spotify" to previous track')
+        line = "Going back one." if ok is not None else \
+            "Couldn't reach Spotify — check the automation permission."
+    else:  # play / resume
+        ok = _osascript('tell application "Spotify" to play')
+        line = "Music on!" if ok is not None else \
+            "Couldn't reach Spotify — check the automation permission."
+    _log_turn("wonder", line)
+    _speak_line(line)
+    return True
+
+
 def _try_resay(text: str) -> bool:
     """If `text` is a re-say request, replay the last line. True if handled."""
     if not _RESAY_RE.search(text):
@@ -419,7 +474,7 @@ def _typed_turn(text: str) -> None:
         return LAST_SPOKEN["text"]
     if _try_game(text):
         return LAST_SPOKEN["text"]
-    if _try_voice_switch(text) or _try_dance(text):
+    if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return LAST_SPOKEN["text"]
     _log_turn("you", text)
     try:
@@ -867,7 +922,7 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
         return muted_until
     if _try_game(text):
         return muted_until
-    if _try_voice_switch(text) or _try_dance(text):
+    if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return muted_until
     if _check_think_aloud_toggle(text):
         return muted_until
@@ -910,7 +965,7 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         return muted_until
     if _try_game(text):
         return muted_until
-    if _try_voice_switch(text) or _try_dance(text):
+    if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
         return muted_until
     if _check_think_aloud_toggle(text):
         return muted_until

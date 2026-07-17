@@ -347,6 +347,50 @@ def best_match(embedding: list[float], samples: list[dict]):
 
 
 # --------------------------------------------------------------------------- #
+# Look-at-speaker (EXPERIMENTAL — set LOOK_AT_SPEAKER=1 to enable).
+# When the mics detect speech and we can see faces, nudge the head toward
+# the face nearest the sound direction. DOA sign/offset conventions need a
+# live human to calibrate against (DOA_FRONT, DOA_SIGN), so this ships OFF.
+# --------------------------------------------------------------------------- #
+LOOK_AT_SPEAKER = os.environ.get("LOOK_AT_SPEAKER", "") == "1"
+DOA_FRONT = float(os.environ.get("DOA_FRONT", "1.5708"))   # radians = "ahead"
+DOA_SIGN = float(os.environ.get("DOA_SIGN", "1"))          # flip if backwards
+_last_glance = {"at": 0.0}
+
+
+def _maybe_glance(faces: list[dict]) -> None:
+    if not LOOK_AT_SPEAKER or not faces:
+        return
+    if time.time() - _last_glance["at"] < 5.0:
+        return
+    try:
+        req = urllib.request.Request(
+            f"{REACHY_URL}/api/state/full?with_doa=true")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            st = json.loads(r.read())
+        doa = st.get("doa") or {}
+        if not doa.get("speech_detected"):
+            return
+        side = DOA_SIGN * (doa.get("angle", DOA_FRONT) - DOA_FRONT)
+        # pick the face whose x-position best matches the sound side
+        target = min(faces, key=lambda f: abs(f["x"] - max(-1, min(1, side))))
+        yaw = st.get("head_pose", {}).get("yaw", 0.0)
+        nudge = max(-0.25, min(0.25, -target["x"] * 0.4))
+        body = {"head_pose": {"x": 0, "y": 0, "z": 0, "roll": 0,
+                              "pitch": st.get("head_pose", {}).get("pitch", 0),
+                              "yaw": yaw + nudge},
+                "antennas": None, "duration": 0.5}
+        req = urllib.request.Request(
+            f"{REACHY_URL}/api/move/goto", data=json.dumps(body).encode(),
+            method="POST", headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=4).read()
+        _last_glance["at"] = time.time()
+        print(f"[memory] glanced toward speaker (nudge {nudge:+.2f})", flush=True)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Control API — lets the dashboard see who Wonder recognizes and name them.   #
 # --------------------------------------------------------------------------- #
 class _MemHandler(BaseHTTPRequestHandler):
@@ -623,6 +667,7 @@ def run():
                     print(f"[memory] supabase insert failed: {e}", flush=True)
 
         _set_current_people(seen_now)
+        _maybe_glance(faces)
 
         # Speak after processing every face this cycle, so two people walking
         # up together each get acknowledged instead of only the first.
