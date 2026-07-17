@@ -168,6 +168,7 @@ def _handle(chat_id: int, text: str) -> None:
               "say: <text> — I'll speak it verbatim\n"
               "/photo — see through my eyes right now\n"
               "/clip — an 8-second video through my eyes\n"
+              "/timelapse — today so far, one frame a minute\n"
               "/status — stack health\n"
               "/alarm 07:30 [daily] — wake-up show (/alarm off clears)\n"
               "/sleep, /wake — power the robot down or up\n"
@@ -228,6 +229,20 @@ def _handle(chat_id: int, text: str) -> None:
             _send(chat_id, "going to sleep" if low == "/sleep" else "waking up")
         except Exception as e:  # noqa: BLE001
             _send(chat_id, f"power toggle failed ({e})")
+        return
+    if low.startswith("/timelapse"):
+        _send(chat_id, "🎞️ assembling the day's timelapse…")
+        try:
+            out = _post_json("http://localhost:8770/timelapse", {}, timeout=300)
+            name = (out or {}).get("name")
+            if not name:
+                raise RuntimeError("not enough frames yet")
+            with urllib.request.urlopen(
+                    f"http://localhost:8770/captures/{name}", timeout=60) as r:
+                mp4 = r.read()
+            _send_video(chat_id, mp4, "the day through my eyes, one frame a minute 🎞️")
+        except Exception as e:  # noqa: BLE001
+            _send(chat_id, f"timelapse failed ({e})")
         return
     if low == "/status":
         lines = []

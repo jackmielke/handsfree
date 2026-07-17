@@ -120,3 +120,11 @@ Newest entries at the bottom. Read with coffee. ☕
   captures/timelapse_<date>/, assembled to mp4 on demand. Started capturing
   IMMEDIATELY — by morning there'll be a film of the whole night, ready to
   assemble with the morning report.
+
+## Session 10 (~03:10)
+- 📱 Telegram /timelapse: assembles today's one-frame-a-minute film and
+  sends it to your phone.
+- 🪪 http://localhost:8770/about — Vibey's self-portrait page, rendered
+  live from IDENTITY.md (the file the robot maintains itself).
+- Systems check for the 07:00 show: caffeinate alive, alarm watcher alive,
+  alarm loaded, volume 45, mic listening, 30+ timelapse frames banked.

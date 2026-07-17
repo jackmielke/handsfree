@@ -1211,6 +1211,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(
                 _get(f"{MEM_URL}/samples?{qs}", timeout=10.0) or []
             ).encode(), "application/json")
+        elif self.path.startswith("/about"):
+            # Who is Vibey? Rendered from its own identity file — the robot
+            # maintains IDENTITY.md itself, so this page is self-describing.
+            try:
+                md = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "IDENTITY.md")).read()
+            except Exception:
+                md = "# Vibey\n(identity file missing)"
+            import html as _html
+            body = _html.escape(md)
+            page = ("<!doctype html><html><head><meta charset=utf-8>"
+                    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "<title>About Vibey</title><style>"
+                    "body{background:#0a0b10;color:#e6e9f2;font:15px/1.6 "
+                    "-apple-system,system-ui,sans-serif;max-width:680px;"
+                    "margin:0 auto;padding:40px 20px}"
+                    "pre{white-space:pre-wrap;font:inherit}"
+                    "a{color:#5ac8fa}</style></head><body>"
+                    "<p><a href='/'>← dashboard</a></p>"
+                    f"<pre>{body}</pre>"
+                    "<p style='color:#8b90a6;font-size:12px'>This page renders "
+                    "IDENTITY.md — a file the robot writes itself.</p>"
+                    "</body></html>")
+            self._send(page.encode(), "text/html; charset=utf-8")
         elif self.path == "/" or self.path.startswith("/index"):
             html = (PAGE
                     .replace("%REACHY%", json.dumps(REACHY_URL))
