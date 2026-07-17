@@ -17,45 +17,56 @@ The brain resolves in this order:
   3. echo mode                             → repeats what it heard (no brain)
 
 Config (.env or environment):
-    WONDER_MODEL     default claude-opus-4-8 (set claude-haiku-4-5 for snappier replies)
+    WONDER_MODEL     default claude-sonnet-5 (set claude-haiku-4-5 for snappier replies)
     WAKE_WORD        optional — e.g. "wonder"; if set, only reply when heard
+
+Fast mode (toggle from the dashboard, or FAST_MODE=1 to start in it): skips
+whisper + Claude entirely and hands the raw utterance straight to an ElevenLabs
+Conversational AI agent (its own realtime STT+LLM+TTS), which tends to be both
+snappier and more reliable than round-tripping through a local model + a CLI
+subprocess. See ELEVEN_AGENT_ID below.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import json
 import os
 import re
 import subprocess
 import threading
 import time
+import urllib.request
+import wave
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import sounddevice as sd
 
-from reachy_voice import load_env, say
+from reachy_voice import load_env, say, upload_sound, play_sound
 
 load_env()
 
-MODEL = os.environ.get("WONDER_MODEL", "claude-opus-4-8")
+MODEL = os.environ.get("WONDER_MODEL", "claude-sonnet-5")
 WAKE_WORD = os.environ.get("WAKE_WORD", "").strip().lower()
 CTRL_PORT = int(os.environ.get("CHAT_PORT", "8772"))
 MEM_URL = os.environ.get("MEM_URL", "http://localhost:8773").rstrip("/")
 
 
-def _current_person() -> str | None:
-    """Name of whoever the face-memory service currently recognizes."""
+def _current_people_names() -> list[str]:
+    """Names of everyone the face-memory service currently sees (can be more
+    than one — it recognizes multiple faces in frame simultaneously)."""
     try:
         import urllib.request
         with urllib.request.urlopen(f"{MEM_URL}/current", timeout=1) as r:
             d = json.loads(r.read())
-        if d.get("fresh") and d.get("name"):
-            return d["name"]
+        return [p["name"] for p in d.get("people", [])
+                if p.get("fresh") and p.get("name")]
     except Exception:
-        pass
-    return None
+        return []
 
 # Shared state the dashboard reads/writes over the control API.
 STATE = {
@@ -64,6 +75,8 @@ STATE = {
     "muted": False,
     "speaking": False,
     "listening": False,
+    "fast": os.environ.get("FAST_MODE", "").strip() == "1",
+    "fast_available": bool(os.environ.get("ELEVEN_AGENT_ID")),
 }
 TRANSCRIPT: deque = deque(maxlen=40)   # {"who": "you"|"wonder", "text", "ts"}
 
@@ -96,6 +109,16 @@ class _CtrlHandler(BaseHTTPRequestHandler):
                 n = int(self.headers.get("Content-Length", 0))
                 STATE["muted"] = bool(json.loads(self.rfile.read(n)).get("muted"))
                 self._json({"ok": True, "muted": STATE["muted"]})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/fastmode"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                fast = bool(json.loads(self.rfile.read(n)).get("fast"))
+                if fast and not STATE["fast_available"]:
+                    raise ValueError("ELEVEN_AGENT_ID not configured")
+                STATE["fast"] = fast
+                self._json({"ok": True, "fast": STATE["fast"]})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
         else:
@@ -174,10 +197,13 @@ class Brain:
         return out
 
     def _persona(self) -> str:
-        who = _current_person()
-        if who:
-            return (f"{PERSONA}\n\nYour camera currently recognizes the person "
-                    f"in front of you: it's {who}. Address them by name "
+        names = _current_people_names()
+        if names:
+            who = names[0] if len(names) == 1 else (
+                ", ".join(names[:-1]) + f" and {names[-1]}")
+            return (f"{PERSONA}\n\nYour camera currently recognizes "
+                    f"{'the person' if len(names) == 1 else 'these people'} "
+                    f"in front of you: {who}. Address them by name "
                     f"naturally (don't overdo it).")
         return PERSONA
 
@@ -205,6 +231,113 @@ class Brain:
 
 
 # --------------------------------------------------------------------------- #
+# Fast mode — ElevenLabs Conversational AI (its own STT+LLM+TTS, one realtime
+# websocket connection per utterance). No whisper, no Claude CLI subprocess.
+# --------------------------------------------------------------------------- #
+ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+AGENT_ID = os.environ.get("ELEVEN_AGENT_ID", "")
+
+
+def _pcm16_from_float32(audio: np.ndarray) -> bytes:
+    clipped = np.clip(audio, -1.0, 1.0)
+    return (clipped * 32767).astype("<i2").tobytes()
+
+
+def _wav_from_pcm16(pcm: bytes, sample_rate: int) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _get_signed_url() -> str:
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
+        f"?agent_id={AGENT_ID}",
+        headers={"xi-api-key": ELEVEN_KEY})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["signed_url"]
+
+
+class FastAgent:
+    """One ElevenLabs Conversational AI turn per call — its own STT+LLM+TTS in
+    a single realtime connection, no whisper and no Claude CLI subprocess.
+
+    Opens a fresh websocket per utterance (proven reliable in testing; a
+    persistent connection kept open across multiple turns stalled after the
+    first reply for reasons not fully diagnosed — a fresh connection per turn
+    sidesteps that entirely). Streams the already-captured utterance at
+    real-time pace, since the server's own end-of-turn detector reads elapsed
+    wall-clock silence between chunks rather than silence baked into the
+    clip's content — confirmed empirically both ways."""
+
+    def turn(self, audio: np.ndarray, sample_rate: int = SR) -> dict:
+        return asyncio.run(self._turn_async(audio, sample_rate))
+
+    async def _turn_async(self, audio: np.ndarray, sample_rate: int) -> dict:
+        import websockets
+
+        url = _get_signed_url()
+        pcm = _pcm16_from_float32(audio)
+        user_text, agent_text = "", ""
+        audio_chunks: list[bytes] = []
+        output_rate = 16000  # pcm_16000
+
+        async with websockets.connect(url, max_size=16 * 1024 * 1024) as ws:
+            CHUNK = 3200  # 0.1s of 16-bit mono @ 16kHz
+            silence_chunk = base64.b64encode(bytes(CHUNK)).decode()
+            for i in range(0, len(pcm), CHUNK):
+                await ws.send(json.dumps({
+                    "user_audio_chunk": base64.b64encode(pcm[i:i + CHUNK]).decode()
+                }))
+                await asyncio.sleep(0.1)
+            for _ in range(15):  # ~1.5s trailing silence to force turn-end
+                await ws.send(json.dumps({"user_audio_chunk": silence_chunk}))
+                await asyncio.sleep(0.1)
+
+            deadline = time.time() + 15.0
+            last_event = time.time()
+            while time.time() < deadline:
+                timeout = max(0.1, min(2.5, deadline - time.time()))
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    if agent_text and audio_chunks:
+                        break
+                    if time.time() - last_event > 6.0:
+                        break
+                    continue
+                last_event = time.time()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                mtype = msg.get("type")
+                if mtype == "user_transcript":
+                    user_text = msg["user_transcription_event"]["user_transcript"]
+                elif mtype == "agent_response":
+                    agent_text = msg["agent_response_event"]["agent_response"]
+                elif mtype == "audio":
+                    ev = msg["audio_event"]
+                    audio_chunks.append(base64.b64decode(ev["audio_base_64"]))
+                    if ev.get("is_final"):
+                        break
+                elif mtype == "ping":
+                    eid = msg.get("ping_event", {}).get("event_id")
+                    if eid is not None:
+                        await ws.send(json.dumps({"type": "pong", "event_id": eid}))
+                elif mtype == "interruption":
+                    break
+
+        pcm_out = b"".join(audio_chunks)
+        wav = _wav_from_pcm16(pcm_out, output_rate) if pcm_out else b""
+        return {"user_text": user_text, "agent_text": agent_text, "wav": wav}
+
+
+# --------------------------------------------------------------------------- #
 # STT
 # --------------------------------------------------------------------------- #
 _whisper = None
@@ -219,12 +352,61 @@ def transcribe(audio: np.ndarray) -> str:
     return " ".join(s.text.strip() for s in segments).strip()
 
 
+def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) -> float:
+    """Whisper transcription → Claude reply → ElevenLabs TTS. Returns the
+    updated muted_until deadline."""
+    t0 = time.time()
+    text = transcribe(audio)
+    print(f"[chat] heard ({time.time()-t0:.1f}s): {text!r}", flush=True)
+    if not (text and len(text.split()) >= 2 and _passes_wake(text)):
+        return muted_until
+    _log_turn("you", text)
+    t1 = time.time()
+    reply = brain.reply(text)
+    print(f"[chat] reply ({time.time()-t1:.1f}s): {reply!r}", flush=True)
+    if not reply:
+        return muted_until
+    _log_turn("wonder", reply)
+    say(reply)
+    return time.time() + max(2.0, len(reply.split()) / 2.4) + 1.5
+
+
+def _handle_fast_turn(agent: "FastAgent", audio: np.ndarray, muted_until: float) -> float:
+    """One ElevenLabs Conversational AI round trip — its own STT+LLM+TTS.
+    Returns the updated muted_until deadline."""
+    t0 = time.time()
+    try:
+        result = agent.turn(audio)
+    except Exception as e:
+        print(f"[fast] error: {e}", flush=True)
+        return muted_until
+    print(f"[fast] round trip {time.time()-t0:.1f}s "
+          f"· heard {result['user_text']!r} · reply {result['agent_text']!r}",
+          flush=True)
+    if result["user_text"]:
+        _log_turn("you", result["user_text"])
+    if not result["wav"]:
+        return muted_until
+    if result["agent_text"]:
+        _log_turn("wonder", result["agent_text"])
+    name = f"fast_{int(time.time()*1000)}.wav"
+    try:
+        upload_sound(result["wav"], name)
+        play_sound(name)
+    except Exception as e:
+        print(f"[fast] playback error: {e}", flush=True)
+        return muted_until
+    clip_s = len(result["wav"]) / 2 / 16000  # 16-bit mono @ 16kHz
+    return time.time() + clip_s + 1.0
+
+
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
 def main():
     _start_ctrl_server()
     brain = Brain()
+    fast_agent = FastAgent()
     STATE["mode"] = brain.mode
     say("Voice chat is on. Talk to me!")
     muted_until = time.time() + 3.0   # let the greeting finish
@@ -263,19 +445,10 @@ def main():
         if in_speech and (silence_s >= SILENCE_HANG_S or segment_s >= MAX_SEGMENT_S):
             if segment_s >= MIN_SEGMENT_S and buf:
                 audio = np.concatenate([b[:, 0] for b in buf]).astype(np.float32)
-                t0 = time.time()
-                text = transcribe(audio)
-                print(f"[chat] heard ({time.time()-t0:.1f}s): {text!r}", flush=True)
-                if text and len(text.split()) >= 2 and _passes_wake(text):
-                    _log_turn("you", text)
-                    t1 = time.time()
-                    reply = brain.reply(text)
-                    print(f"[chat] reply ({time.time()-t1:.1f}s): {reply!r}", flush=True)
-                    if reply:
-                        _log_turn("wonder", reply)
-                        say(reply)
-                        # mute mic for roughly the clip length + upload slack
-                        muted_until = time.time() + max(2.0, len(reply.split()) / 2.4) + 1.5
+                if STATE["fast"]:
+                    muted_until = _handle_fast_turn(fast_agent, audio, muted_until)
+                else:
+                    muted_until = _handle_brain_turn(brain, audio, muted_until)
             in_speech = False; buf = []; silence_s = segment_s = 0.0
 
 

@@ -66,14 +66,14 @@ def gather() -> dict:
     """One consolidated perception snapshot for the browser to render."""
     face = _get(f"{REACHY_URL}/api/media/tracking/face")
     state = _get(f"{REACHY_URL}/api/state/full?with_doa=true")
-    person = _get(f"{MEM_URL}/current", timeout=1.0)
+    current = _get(f"{MEM_URL}/current", timeout=1.0)
     online = face is not None or state is not None
     ft = (face or {}).get("face_target", {}) if face else {}
     doa = (state or {}).get("doa", {}) if state else {}
-    if person and not person.get("fresh"):
-        person = None
+    # Everyone memory currently recognizes (0, 1, or several people at once).
+    people = [p for p in (current or {}).get("people", []) if p.get("fresh")]
     return {
-        "person": person,
+        "people": people,
         "online": online,
         "face": {
             "detected": bool(ft.get("detected")),
@@ -124,6 +124,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   .vc-btn{width:42px;height:42px;border-radius:50%;border:1px solid var(--line);
           background:#0a0b10;font-size:18px;cursor:pointer;transition:all .15s}
   .vc-btn.muted{background:#3b1219;border-color:#7f1d2d}
+  .vc-btn.fast-on{background:#3a2e10;border-color:#7c5c1e;color:var(--warn)}
+  .vc-btn:disabled{opacity:.35;cursor:not-allowed}
   .vc-chip{font-size:12px;color:var(--dim);background:#0a0b10;border:1px solid var(--line);
            border-radius:20px;padding:5px 12px}
   .vc-chip.live{color:var(--good);border-color:#1e3a2f}
@@ -138,6 +140,32 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   .msg.wonder{align-self:flex-start;background:#1b1f2e;border-bottom-left-radius:4px}
   .msg .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:1px;
             color:var(--dim);margin-bottom:2px}
+  .gallery{display:flex;flex-wrap:wrap;gap:14px}
+  .gallery-empty{color:#3a3f52;font-size:13px;padding:16px 0}
+  .person{width:104px;text-align:center}
+  .person .thumb{width:104px;height:104px;border-radius:12px;object-fit:cover;
+                 background:#0a0b10;border:2px solid var(--line);display:block}
+  .person.named .thumb{border-color:#14324a}
+  .person-del{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;
+              background:#3b1219;border:1px solid #7f1d2d;color:#fca5a5;font-size:14px;
+              line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .person-del:hover{background:#5a1a25}
+  .pname-input{width:104px;margin-top:6px;font-size:13px;font-weight:600;color:var(--txt);
+               background:transparent;border:1px solid transparent;border-radius:6px;
+               text-align:center;padding:2px 4px;font-family:inherit}
+  .pname-input::placeholder{color:var(--dim);font-weight:400;font-style:italic}
+  .pname-input:hover,.pname-input:focus{border-color:var(--line);background:#0a0b10;outline:none}
+  .person .pmeta{font-size:11px;color:var(--dim);margin-top:1px}
+  .peoplerows{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+  .prow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .prow-known{background:#14324a;color:var(--accent);border-radius:20px;
+              padding:4px 12px;font-size:13px;font-weight:600}
+  .prow select,.prow input{background:#0a0b10;border:1px solid #7c5c1e;border-radius:8px;
+               color:var(--txt);font:inherit;font-size:13px;padding:6px 8px;outline:none}
+  .prow select{max-width:130px}
+  .prow input{flex:1;min-width:90px}
+  .prow button{background:var(--warn);color:#1c1503;border:0;border-radius:8px;
+               padding:6px 12px;font:inherit;font-weight:700;cursor:pointer;font-size:13px}
 </style></head><body>
 <h1>🤖 Wonder — what the robot sees</h1>
 <div class=sub id=status>connecting…</div>
@@ -156,16 +184,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   <div class=panel>
     <h2>Perception</h2>
     <div class=kv><span>Face detected</span><b id=facedet>—</b></div>
-    <div class=kv><span>Person</span><b id=person>—</b></div>
-    <div id=namerow style="display:none;margin-top:10px;gap:8px" class=namerow>
-      <input id=nameinput placeholder="Who is this? Type their name…"
-        style="flex:1;background:#0a0b10;border:1px solid #7c5c1e;border-radius:10px;
-               padding:8px 12px;color:var(--txt);font:inherit;outline:none">
-      <button id=namebtn
-        style="background:var(--warn);color:#1c1503;border:0;border-radius:10px;
-               padding:8px 14px;font:inherit;font-weight:700;cursor:pointer">Teach</button>
-    </div>
-    <div class=kv><span>Face position</span><b class=mono id=facepos>—</b></div>
+    <div class=kv><span>People in view</span><b id=personcount>—</b></div>
+    <div id=peoplerows class=peoplerows></div>
     <div class=kv><span>Hearing sound at</span><b class=mono id=doa>—</b></div>
     <div class=kv><span>Speech now</span><b id=speech>—</b></div>
   </div>
@@ -173,6 +193,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <h2>Voice · talk with Wonder</h2>
     <div class=vc-controls>
       <button id=mutebtn class=vc-btn title="Mute Wonder's ears">🎙️</button>
+      <button id=fastbtn class="vc-btn vc-fastbtn" title="Fast mode: ElevenLabs agent, skips Claude">⚡</button>
       <span id=vcstatus class=vc-chip>connecting…</span>
       <span style="flex:1"></span>
       <span class=vc-vol>🔈
@@ -198,6 +219,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <div class=kv><span>Voice</span><b id=voice>—</b></div>
     <div class=kv><span>Last command</span><b id=cmd>—</b></div>
   </div>
+  <div class="panel full">
+    <h2>Known faces <span id=peoplecount class=sub style="display:inline;margin-left:6px"></span></h2>
+    <div id=gallery class=gallery>
+      <div class=gallery-empty>Nobody learned yet — stand in front of Wonder and teach it a name above.</div>
+    </div>
+    <datalist id=knownNamesList></datalist>
+  </div>
 </div>
 <script>
 const REACHY=%REACHY%, HANDSFREE=%HANDSFREE%, CAM=%CAM%;
@@ -210,22 +238,31 @@ cam.onerror=()=>{$('noc').style.display='flex';cam.style.opacity=0;};
 cam.onload =()=>{$('noc').style.display='none';cam.style.opacity=1;};
 cam.src=CAM+'/stream';
 
-let personName=null;   // updated by tick(); drawn on the overlay
+// Names Wonder already knows, for the "who is this" dropdown — refreshed
+// alongside the gallery so a newly-taught name shows up here too.
+let knownNames=[];
+async function fetchKnownNames(){
+  try{
+    knownNames=await(await fetch('/knownnames')).json();
+    const dl=$('knownNamesList');
+    dl.innerHTML=knownNames.map(n=>`<option value="${n.replace(/"/g,'&quot;')}">`).join('');
+  }catch(_){}
+}
 
-function drawFOV(f){
-  // Transparent overlay on top of the video — only the face marker + a faint
-  // crosshair; the live camera shows through everything else.
+function drawFOV(people){
+  // Transparent overlay on top of the video — a ring + label per person in
+  // frame (there can be more than one), plus a faint crosshair.
   const W=c.width,H=c.height;
   g.clearRect(0,0,W,H);
   g.strokeStyle='rgba(255,255,255,.10)';g.lineWidth=1;
   g.beginPath();g.moveTo(W/2,0);g.lineTo(W/2,H);g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
-  if(f&&f.detected){
+  for(const p of (people||[])){
     // x,y are normalized offsets ~[-1,1]; center them into the frame
-    const x=W/2+(f.x||0)*W/2, y=H/2+(f.y||0)*H/2;
-    const known=!!personName;
+    const x=W/2+(p.x||0)*W/2, y=H/2+(p.y||0)*H/2;
+    const known=!!p.name;
     g.strokeStyle=known?'#5ac8fa':'#4ade80';g.lineWidth=3;
     g.beginPath();g.arc(x,y,44,0,7);g.stroke();
-    const label=personName||'face';
+    const label=p.name||'unknown';
     g.font='bold 14px system-ui';
     const tw=g.measureText(label).width;
     g.fillStyle='rgba(5,6,10,.75)';
@@ -235,29 +272,76 @@ function drawFOV(f){
   }
 }
 
+// Renders one row per currently-visible person: a pill for known names, or a
+// dropdown-of-known-names + free-text fallback + Teach button for unknowns.
+let peopleRowIds=[];
+function renderPeopleRows(people){
+  const ids=people.map(p=>p.face_id+'|'+(p.name||'')).join(',');
+  if(ids===peopleRowIds.join(','))return;  // avoid nuking focus every 250ms
+  peopleRowIds=people.map(p=>p.face_id+'|'+(p.name||''));
+  const box=$('peoplerows');
+  box.innerHTML='';
+  for(const p of people){
+    const row=document.createElement('div');
+    row.className='prow';
+    if(p.name){
+      const pill=document.createElement('span');
+      pill.className='prow-known';
+      pill.textContent=p.name;
+      row.appendChild(pill);
+    }else{
+      const sel=document.createElement('select');
+      const opt0=document.createElement('option');
+      opt0.value=''; opt0.textContent=knownNames.length?'pick a known name…':'(no known names yet)';
+      sel.appendChild(opt0);
+      for(const n of knownNames){
+        const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+      }
+      const optNew=document.createElement('option');
+      optNew.value='__new__'; optNew.textContent='+ new name…';
+      sel.appendChild(optNew);
+
+      const input=document.createElement('input');
+      input.placeholder='type a new name…';
+      input.style.display='none';
+
+      sel.onchange=()=>{
+        input.style.display = sel.value==='__new__' ? '' : 'none';
+        if(sel.value==='__new__') input.focus();
+      };
+
+      const btn=document.createElement('button');
+      btn.textContent='Teach';
+      btn.onclick=async()=>{
+        const name=(sel.value==='__new__'?input.value:sel.value).trim();
+        if(!name)return;
+        btn.disabled=true;
+        try{
+          await fetch('/nameface',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({name,face_id:p.face_id})});
+        }catch(_){}
+        galleryLen=-1; fetchGallery(); fetchKnownNames();
+        btn.disabled=false;
+      };
+
+      row.appendChild(sel); row.appendChild(input); row.appendChild(btn);
+    }
+    box.appendChild(row);
+  }
+}
+
 async function tick(){
   try{
     const r=await fetch('/perception');const d=await r.json();
     $('status').innerHTML = d.online
       ? '<span class=dot style=background:var(--good)></span>robot online · '+REACHY
       : '<span class=dot style=background:var(--bad)></span>robot offline · '+REACHY;
-    const f=d.face||{};
-    $('facedet').textContent=f.detected?'yes ✅':'no';
-    $('facepos').textContent=f.detected?`x ${(+f.x).toFixed(2)}  y ${(+f.y).toFixed(2)}`:'—';
-    // recognized person + name-teaching form
-    const per=d.person;
-    personName=per&&per.name?per.name:null;
-    if(per&&per.name){
-      $('person').innerHTML='<span class=pill style="background:#14324a;color:var(--accent)">'+per.name+'</span>';
-      $('namerow').style.display='none';
-    }else if(per&&per.face_id){
-      $('person').innerHTML='<span class=pill style="background:#3a2e10;color:var(--warn)">unknown</span>';
-      $('namerow').style.display='flex';
-      window._faceId=per.face_id;
-    }else{
-      $('person').textContent='—';
-      $('namerow').style.display='none';
-    }
+    const people=d.people||[];
+    $('facedet').textContent=people.length?'yes ✅':'no';
+    $('personcount').textContent=people.length
+      ? people.length+' · '+people.map(p=>p.name||'unknown').join(', ')
+      : '—';
+    renderPeopleRows(people);
     const ang=d.doa&&d.doa.angle!=null?(d.doa.angle*180/Math.PI).toFixed(0)+'°':'—';
     $('doa').textContent=ang;
     $('speech').innerHTML=d.doa&&d.doa.speech
@@ -266,7 +350,7 @@ async function tick(){
     $('pose').textContent=p?`${p.roll.toFixed(2)} ${p.pitch.toFixed(2)} ${p.yaw.toFixed(2)}`:'—';
     const a=d.antennas;
     $('ant').textContent=a?`${a[0].toFixed(2)}  ${a[1].toFixed(2)}`:'—';
-    drawFOV(f);
+    drawFOV(people);
   }catch(e){
     $('status').innerHTML='<span class=dot style=background:var(--bad)></span>viewer error';
   }
@@ -288,7 +372,7 @@ function connectHandsfree(){
   }catch(e){$('voice').textContent='handsfree offline';}
 }
 // ---- voice conversation panel ----
-let vcMuted=false, lastLen=-1;
+let vcMuted=false, vcFast=false, lastLen=-1;
 
 $('mutebtn').onclick=async()=>{
   vcMuted=!vcMuted;
@@ -296,6 +380,13 @@ $('mutebtn').onclick=async()=>{
   $('mutebtn').textContent=vcMuted?'🔇':'🎙️';
   try{await fetch('/mute',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({muted:vcMuted})});}catch(_){}
+};
+
+$('fastbtn').onclick=async()=>{
+  vcFast=!vcFast;
+  $('fastbtn').classList.toggle('fast-on',vcFast);
+  try{await fetch('/fastmode',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({fast:vcFast})});}catch(_){}
 };
 
 let volTimer=null;
@@ -336,31 +427,26 @@ async function chatTick(){
     if(d.mode==='offline'){s.textContent='voice chat offline — start reachy_chat.py';s.className='vc-chip';}
     else if(d.speaking){s.textContent='🔊 Wonder is speaking…';s.className='vc-chip talk';}
     else if(d.muted){s.textContent='muted';s.className='vc-chip';}
+    else if(d.fast){s.textContent='👂 listening · ⚡ fast mode (ElevenLabs agent)';s.className='vc-chip live';}
     else{s.textContent='👂 listening · brain: '+d.mode+' ('+(d.model||'').replace('claude-','')+')';s.className='vc-chip live';}
     if(d.muted!==undefined&&d.muted!==vcMuted){
       vcMuted=d.muted;
       $('mutebtn').classList.toggle('muted',vcMuted);
       $('mutebtn').textContent=vcMuted?'🔇':'🎙️';
     }
+    if(d.fast!==undefined&&d.fast!==vcFast){
+      vcFast=d.fast;
+      $('fastbtn').classList.toggle('fast-on',vcFast);
+    }
+    $('fastbtn').disabled = d.fast_available===false;
+    $('fastbtn').title = d.fast_available===false
+      ? 'Fast mode unavailable — ELEVEN_AGENT_ID not configured'
+      : 'Fast mode: ElevenLabs agent, skips Claude';
     renderConvo(d.transcript||[]);
   }catch(_){}
 }
 setInterval(chatTick,800);chatTick();
 
-// ---- teach Wonder a name ----
-async function teachName(){
-  const name=$('nameinput').value.trim();
-  if(!name||!window._faceId)return;
-  $('namebtn').textContent='…';
-  try{
-    const r=await fetch('/nameface',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name,face_id:window._faceId})});
-    if(r.ok){$('nameinput').value='';$('namerow').style.display='none';}
-  }catch(_){}
-  $('namebtn').textContent='Teach';
-}
-$('namebtn').onclick=teachName;
-$('nameinput').addEventListener('keydown',e=>{if(e.key==='Enter')teachName();});
 async function speak(text){
   text=(text||'').trim(); if(!text)return;
   $('saystatus').textContent='speaking…';
@@ -374,8 +460,80 @@ $('saybtn').onclick=()=>{speak($('saytext').value);$('saytext').value='';};
 $('saytext').addEventListener('keydown',e=>{
   if(e.key==='Enter'){speak($('saytext').value);$('saytext').value='';}});
 
+// ---- known-faces gallery ----
+let galleryLen=-1;
+async function fetchGallery(){
+  try{
+    const people=await(await fetch('/peoplelist')).json();
+    if(!Array.isArray(people))return;
+    $('peoplecount').textContent=people.length?('· '+people.length):'';
+    if(people.length===galleryLen)return;  // cheap no-op guard
+    galleryLen=people.length;
+    const g=$('gallery');
+    if(!people.length){
+      g.innerHTML='<div class=gallery-empty>Nobody learned yet — stand in front of Wonder and teach it a name above.</div>';
+      return;
+    }
+    g.innerHTML='';
+    for(const p of people){
+      const el=document.createElement('div');
+      el.className='person'+(p.name?' named':'');
+
+      const thumbWrap=document.createElement('div');
+      thumbWrap.style.cssText='position:relative';
+      const img=document.createElement('img');
+      img.className='thumb';
+      img.src=p.snapshot||'';
+      img.alt=p.name||'unnamed';
+      const delBtn=document.createElement('button');
+      delBtn.textContent='×';
+      delBtn.title='Forget '+(p.name||'this person');
+      delBtn.className='person-del';
+      delBtn.onclick=async()=>{
+        if(!confirm(`Forget ${p.name||'this unnamed person'}? This deletes all ${p.sample_count} learned photo(s).`))return;
+        delBtn.disabled=true;
+        try{
+          await fetch('/deleteface',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({face_id:p.id})});
+        }catch(_){}
+        galleryLen=-1; fetchGallery();
+      };
+      thumbWrap.appendChild(img); thumbWrap.appendChild(delBtn);
+
+      const nameInput=document.createElement('input');
+      nameInput.className='pname-input';
+      nameInput.value=p.name||'';
+      nameInput.placeholder='name…';
+      nameInput.setAttribute('list','knownNamesList');
+      const saveName=async()=>{
+        const v=nameInput.value.trim();
+        if(!v||v===p.name)return;
+        try{
+          await fetch('/nameface',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({name:v,face_id:p.id})});
+        }catch(_){}
+        galleryLen=-1; fetchGallery();
+      };
+      nameInput.addEventListener('blur',saveName);
+      nameInput.addEventListener('keydown',e=>{if(e.key==='Enter')nameInput.blur();});
+      // Select-all on focus so a click-to-edit never silently inserts text
+      // mid-name instead of replacing it.
+      nameInput.addEventListener('focus',()=>nameInput.select());
+
+      const meta=document.createElement('div');
+      meta.className='pmeta';
+      meta.textContent=`seen ${p.times_seen}× · ${p.sample_count} photo${p.sample_count===1?'':'s'}`;
+
+      el.appendChild(thumbWrap); el.appendChild(nameInput); el.appendChild(meta);
+      g.appendChild(el);
+    }
+  }catch(_){}
+}
+
 connectHandsfree();
 setInterval(tick,250);tick();
+setInterval(fetchGallery,5000);fetchGallery();
+setInterval(fetchKnownNames,5000);fetchKnownNames();
 </script></body></html>"""
 
 
@@ -401,6 +559,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(
                 _get(f"{REACHY_URL}/api/volume/current") or {}
             ).encode(), "application/json")
+        elif self.path.startswith("/peoplelist"):
+            self._send(json.dumps(
+                _get(f"{MEM_URL}/people", timeout=8.0) or []
+            ).encode(), "application/json")
+        elif self.path.startswith("/knownnames"):
+            self._send(json.dumps(
+                _get(f"{MEM_URL}/names", timeout=8.0) or []
+            ).encode(), "application/json")
         elif self.path == "/" or self.path.startswith("/index"):
             html = (PAGE
                     .replace("%REACHY%", json.dumps(REACHY_URL))
@@ -413,16 +579,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if (self.path.startswith("/mute") or self.path.startswith("/volume")
-                or self.path.startswith("/nameface")):
+                or self.path.startswith("/nameface") or self.path.startswith("/fastmode")
+                or self.path.startswith("/deleteface")):
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n))
                 if self.path.startswith("/mute"):
                     out = _post(f"{CHAT_URL}/mute", {"muted": bool(body.get("muted"))})
+                elif self.path.startswith("/fastmode"):
+                    out = _post(f"{CHAT_URL}/fastmode", {"fast": bool(body.get("fast"))})
                 elif self.path.startswith("/nameface"):
                     out = _post(f"{MEM_URL}/name",
                                 {"name": body.get("name", ""),
                                  "face_id": body.get("face_id")}, timeout=20.0)
+                elif self.path.startswith("/deleteface"):
+                    out = _post(f"{MEM_URL}/deleteface",
+                                {"face_id": body.get("face_id")}, timeout=10.0)
                 else:
                     vol = max(0, min(100, int(body.get("volume", 50))))
                     out = _post(f"{REACHY_URL}/api/volume/set", {"volume": vol})
