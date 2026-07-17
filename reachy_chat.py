@@ -267,6 +267,133 @@ def _try_dance(text: str) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# Party game: trivia. "let's play trivia" starts it; every utterance while a
+# game is on is treated as an answer. Scores are per-person when face memory
+# recognizes who's in frame. "stop the game" ends it with a victory dance.
+# --------------------------------------------------------------------------- #
+GAME = {"on": False, "round": 0, "max_rounds": 5, "q": None, "a": None,
+        "attempts": 0, "scores": {}}
+_GAME_START_RE = re.compile(r"\b(play trivia|trivia time|let'?s play (a game|trivia)|start (a )?trivia)\b", re.I)
+_GAME_STOP_RE = re.compile(r"\b(stop|end|quit) the game\b|\bgame over\b", re.I)
+
+
+def _haiku(prompt: str, timeout: int = 30) -> str:
+    r = subprocess.run(["claude", "-p", "--model", "haiku", prompt],
+                       capture_output=True, text=True, timeout=timeout)
+    return (r.stdout or "").strip()
+
+
+def _new_question() -> tuple[str, str]:
+    out = _haiku(
+        "Generate ONE fun trivia question for a casual living-room game. "
+        "Mix of topics (science, movies, animals, music, geography), medium "
+        "difficulty, short factual answer. Reply as exactly two lines:\n"
+        "Q: <question>\nA: <answer>")
+    q, a = "", ""
+    for ln in out.splitlines():
+        if ln.strip().lower().startswith("q:"):
+            q = ln.split(":", 1)[1].strip()
+        elif ln.strip().lower().startswith("a:"):
+            a = ln.split(":", 1)[1].strip()
+    if not q:
+        q, a = "What planet is known as the red planet?", "Mars"
+    return q, a
+
+
+def _judge(question: str, answer: str, said: str) -> bool:
+    out = _haiku(
+        f"Trivia judging. Question: {question!r}. Correct answer: {answer!r}. "
+        f"The player said: {said!r}. Is the player essentially correct, "
+        f"allowing partial words, mishearings, or the right idea? "
+        f"Reply exactly YES or NO.")
+    return "YES" in out.upper()
+
+
+def _player_name() -> str:
+    names = _current_people_names()
+    return names[0] if names else "mystery player"
+
+
+def _game_scoreboard() -> str:
+    if not GAME["scores"]:
+        return "no points yet"
+    return ", ".join(f"{n} has {s}" for n, s in
+                     sorted(GAME["scores"].items(), key=lambda kv: -kv[1]))
+
+
+def _try_game(text: str) -> bool:
+    """Trivia state machine. Returns True if the utterance was game business."""
+    if _GAME_START_RE.search(text) and not GAME["on"]:
+        GAME.update({"on": True, "round": 1, "attempts": 0, "scores": {}})
+        GAME["q"], GAME["a"] = _new_question()
+        _log_turn("you", text)
+        line = (f"Trivia time! {GAME['max_rounds']} questions, shout your "
+                f"answers. Question one: {GAME['q']}")
+        _log_turn("wonder", line)
+        try:
+            from reachy_emotes import play as _pe
+            _pe("excited")
+        except Exception:
+            pass
+        _speak_line(line)
+        return True
+    if not GAME["on"]:
+        return False
+    _log_turn("you", text)
+    if _GAME_STOP_RE.search(text):
+        GAME["on"] = False
+        line = f"Game over! Final scores: {_game_scoreboard()}. Thanks for playing!"
+        _log_turn("wonder", line)
+        try:
+            from reachy_emotes import play as _pe
+            _pe("victory", sound=True)
+        except Exception:
+            pass
+        time.sleep(1.5)
+        _speak_line(line)
+        return True
+
+    # everything else while a game is on = an answer attempt
+    if _judge(GAME["q"], GAME["a"], text):
+        who = _player_name()
+        GAME["scores"][who] = GAME["scores"].get(who, 0) + 1
+        try:
+            from reachy_emotes import play as _pe
+            _pe("victory", sound=True)
+        except Exception:
+            pass
+        time.sleep(1.2)
+        prefix = f"Correct! Point to {who}. "
+    else:
+        GAME["attempts"] += 1
+        if GAME["attempts"] < 2:
+            line = "Nope, not it — one more guess!"
+            _log_turn("wonder", line)
+            _speak_line(line)
+            return True
+        prefix = f"The answer was {GAME['a']}. "
+        try:
+            from reachy_emotes import play as _pe
+            _pe("sad")
+        except Exception:
+            pass
+
+    GAME["attempts"] = 0
+    GAME["round"] += 1
+    if GAME["round"] > GAME["max_rounds"]:
+        GAME["on"] = False
+        line = prefix + f"That's the game! Final scores: {_game_scoreboard()}."
+        _log_turn("wonder", line)
+        _speak_line(line)
+        return True
+    GAME["q"], GAME["a"] = _new_question()
+    line = prefix + f"Question {GAME['round']}: {GAME['q']}"
+    _log_turn("wonder", line)
+    _speak_line(line)
+    return True
+
+
 def _try_resay(text: str) -> bool:
     """If `text` is a re-say request, replay the last line. True if handled."""
     if not _RESAY_RE.search(text):
@@ -289,6 +416,8 @@ def _typed_turn(text: str) -> None:
     """A chat message typed on the dashboard — same brains as the mic path
     (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
     if _try_resay(text):
+        return LAST_SPOKEN["text"]
+    if _try_game(text):
         return LAST_SPOKEN["text"]
     if _try_voice_switch(text) or _try_dance(text):
         return LAST_SPOKEN["text"]
@@ -736,6 +865,8 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
         return muted_until
     if _try_resay(text):
         return muted_until
+    if _try_game(text):
+        return muted_until
     if _try_voice_switch(text) or _try_dance(text):
         return muted_until
     if _check_think_aloud_toggle(text):
@@ -776,6 +907,8 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         print(f"[chat] ignored own echo: {text!r}", flush=True)
         return muted_until
     if _try_resay(text):
+        return muted_until
+    if _try_game(text):
         return muted_until
     if _try_voice_switch(text) or _try_dance(text):
         return muted_until

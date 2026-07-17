@@ -35,3 +35,13 @@ Newest entries at the bottom. Read with coffee. ☕
 - 📱 Telegram grew /clip — records 8 seconds through Vibey's eyes and sends
   the video to your phone.
 - Tested both live: photo + mp4 captured and playable.
+
+## Session 2 (~23:10)
+- Health: all green. Robot volume had crept back to 100 on its own (recurring
+  daemon quirk — worth a watchdog someday); reset to 45.
+- 🎲 Vibey is now a trivia host! Say "let's play trivia" (or text it):
+  5 questions (haiku-generated, fresh every game), shout answers — judging is
+  forgiving about mishearings, wrong answers get one retry, correct ones get
+  the victory chirp. Scores are per-person when face memory recognizes who's
+  playing ("Correct! Point to Kai."). "Stop the game" ends with the
+  scoreboard and a victory dance. Tested a full game end-to-end.
