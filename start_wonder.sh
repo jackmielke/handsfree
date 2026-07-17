@@ -22,6 +22,7 @@ stop_all() {
   pkill -f "reachy_viewer.py" 2>/dev/null
   pkill -f "reachy_chat.py"   2>/dev/null
   pkill -f "reachy_memory.py" 2>/dev/null
+  pkill -f "reachy_vibeverse.py" 2>/dev/null
   echo "wonder stack stopped."
 }
 
@@ -41,6 +42,7 @@ reachy_env/bin/python3 reachy_camera.py  > /tmp/reachy_camera.log 2>&1 &
 python3                reachy_viewer.py  > /tmp/reachy_viewer.log 2>&1 &
 .venv/bin/python3      reachy_chat.py    > /tmp/reachy_chat.log   2>&1 &
 reachy_env/bin/python3 reachy_memory.py  > /tmp/reachy_memory.log 2>&1 &
+python3                reachy_vibeverse.py > /tmp/vibeverse.log     2>&1 &
 
 echo "starting… (camera takes ~10s to negotiate WebRTC)"
 sleep 12

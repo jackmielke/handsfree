@@ -4,32 +4,50 @@
     {
       "name": "handsfree",
       "runtimeExecutable": ".venv/bin/python3",
-      "runtimeArgs": ["browser_viewer.py"],
+      "runtimeArgs": [
+        "browser_viewer.py"
+      ],
       "port": 8765
     },
     {
       "name": "wonder-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["reachy_viewer.py"],
+      "runtimeArgs": [
+        "reachy_viewer.py"
+      ],
       "port": 8770
     },
     {
       "name": "wonder-camera",
       "runtimeExecutable": "reachy_env/bin/python3",
-      "runtimeArgs": ["reachy_camera.py"],
+      "runtimeArgs": [
+        "reachy_camera.py"
+      ],
       "port": 8771
     },
     {
       "name": "wonder-chat",
       "runtimeExecutable": ".venv/bin/python3",
-      "runtimeArgs": ["reachy_chat.py"],
+      "runtimeArgs": [
+        "reachy_chat.py"
+      ],
       "port": 8772
     },
     {
       "name": "wonder-memory",
       "runtimeExecutable": "reachy_env/bin/python3",
-      "runtimeArgs": ["reachy_memory.py"],
+      "runtimeArgs": [
+        "reachy_memory.py"
+      ],
       "port": 8773
+    },
+    {
+      "name": "wonder-vibeverse",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "reachy_vibeverse.py"
+      ],
+      "port": 8774
     }
   ]
 }

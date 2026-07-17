@@ -224,6 +224,49 @@ def _is_echo(heard: str) -> bool:
     return overlap >= 0.7
 
 
+_VOICE_RE = re.compile(r"\b(australian|aussie|british|vibey)\s+(accent|voice)\b", re.I)
+_DANCE_RE = re.compile(r"\b(dance mode|do a dance|dance for (me|us)|bust a move|start dancing)\b", re.I)
+
+_VOICE_CONFIRM = {
+    "australian": "G'day! Australian accent locked in, mate.",
+    "aussie": "Too easy mate, Aussie mode on.",
+    "british": "Right then — back to proper British.",
+    "vibey": "Okay, this is my vibey voice now.",
+}
+
+
+def _try_voice_switch(text: str) -> bool:
+    """'switch to the australian accent' → swap the ElevenLabs voice live and
+    confirm out loud in the NEW voice."""
+    m = _VOICE_RE.search(text)
+    if not m:
+        return False
+    from reachy_voice import set_voice
+    name = m.group(1).lower()
+    if set_voice(name):
+        _log_turn("you", text)
+        line = _VOICE_CONFIRM.get(name, f"Voice switched to {name}.")
+        _log_turn("wonder", line)
+        _speak_line(line)
+    return True
+
+
+def _try_dance(text: str) -> bool:
+    """'dance mode' → beat + full-body groove."""
+    if not _DANCE_RE.search(text):
+        return False
+    _log_turn("you", text)
+    _log_turn("wonder", "(dance mode!) 🕺")
+    try:
+        from reachy_emotes import play_dance
+        play_dance(12.0)
+        # keep the mic shut while the beat plays so it doesn't hear the music
+        MUTED_EXT["until"] = time.time() + 14.0
+    except Exception as e:
+        print(f"[dance] failed: {e}", flush=True)
+    return True
+
+
 def _try_resay(text: str) -> bool:
     """If `text` is a re-say request, replay the last line. True if handled."""
     if not _RESAY_RE.search(text):
@@ -246,6 +289,8 @@ def _typed_turn(text: str) -> None:
     """A chat message typed on the dashboard — same brains as the mic path
     (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
     if _try_resay(text):
+        return
+    if _try_voice_switch(text) or _try_dance(text):
         return
     _log_turn("you", text)
     try:
@@ -678,6 +723,8 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
         return muted_until
     if _try_resay(text):
         return muted_until
+    if _try_voice_switch(text) or _try_dance(text):
+        return muted_until
     if _check_think_aloud_toggle(text):
         return muted_until
     _log_turn("you", text)
@@ -716,6 +763,8 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         print(f"[chat] ignored own echo: {text!r}", flush=True)
         return muted_until
     if _try_resay(text):
+        return muted_until
+    if _try_voice_switch(text) or _try_dance(text):
         return muted_until
     if _check_think_aloud_toggle(text):
         return muted_until

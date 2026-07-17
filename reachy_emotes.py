@@ -237,11 +237,87 @@ def play(emotion: str, sound: bool = False) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# Dance mode — a synthesized beat + a looping full-body groove.               #
+# --------------------------------------------------------------------------- #
+def _beat_track(seconds: float = 12.0, bpm: int = 118) -> bytes:
+    """A tiny synthesized dance beat: sine-kick four-on-the-floor with an
+    off-beat blip. No samples, no downloads — pure math, very robot."""
+    spb = 60.0 / bpm
+    total = int(SR * seconds)
+    buf = [0.0] * total
+    t = 0.0
+    beat_i = 0
+    while t < seconds:
+        start = int(t * SR)
+        # kick: 150→50 Hz thump
+        for i, s in enumerate(_sweep(150, 50, 0.11, 0.85)):
+            j = start + i
+            if j < total:
+                buf[j] += s
+        # off-beat blip every other beat
+        if beat_i % 2 == 1:
+            for i, s in enumerate(_sweep(880, 860, 0.04, 0.18)):
+                j = start + int(SR * spb / 2) + i
+                if j < total:
+                    buf[j] += s
+        t += spb
+        beat_i += 1
+    return _to_wav([max(-1, min(1, s)) for s in buf])
+
+
+def dance(seconds: float = 12.0, bpm: int = 118) -> None:
+    """Dance mode: play the beat on the robot and groove until it ends.
+    Blocking — call from a thread (play(..) style) if you need async."""
+    name = "wonder_sfx_beat.wav"
+    with _upload_lock:
+        if "beat" not in _uploaded:
+            wav = _beat_track(seconds, bpm)
+            boundary = f"----emote{uuid.uuid4().hex}"
+            payload = ((f"--{boundary}\r\nContent-Disposition: form-data; "
+                        f'name="file"; filename="{name}"\r\n'
+                        f"Content-Type: audio/wav\r\n\r\n").encode()
+                       + wav + f"\r\n--{boundary}--\r\n".encode())
+            req = urllib.request.Request(
+                f"{REACHY_URL}/api/media/sounds/upload", data=payload,
+                method="POST",
+                headers={"Content-Type":
+                         f"multipart/form-data; boundary={boundary}"})
+            urllib.request.urlopen(req, timeout=15).read()
+            _uploaded.add("beat")
+    _post("/api/media/play_sound", {"file": name})
+
+    spb = 60.0 / bpm
+    end = time.time() + seconds
+    moves = [
+        lambda: _goto(_pose(roll=0.22, pitch=0.1), [0.9, -0.4], spb * 0.9),
+        lambda: _goto(_pose(roll=-0.22, pitch=-0.08), [-0.4, 0.9], spb * 0.9),
+        lambda: _goto(_pose(pitch=0.18, yaw=0.25), [1.0, -1.0], spb * 0.9),
+        lambda: _goto(_pose(pitch=-0.15, yaw=-0.25), [0.5, 0.5], spb * 0.9),
+    ]
+    i = 0
+    while time.time() < end:
+        moves[i % len(moves)]()
+        time.sleep(spb)
+        i += 1
+    _goto(NEUTRAL, [0.2, -0.2], 0.6)
+
+
+def play_dance(seconds: float = 12.0) -> None:
+    """Non-blocking dance mode."""
+    threading.Thread(target=dance, args=(seconds,), daemon=True).start()
+
+
 if __name__ == "__main__":
     import sys
     emotion = sys.argv[1] if len(sys.argv) > 1 else "happy"
+    if emotion == "dance":
+        secs = float(sys.argv[2]) if len(sys.argv) > 2 else 12.0
+        print(f"[emote] dance mode for {secs:.0f}s 🕺")
+        dance(secs)
+        sys.exit(0)
     if emotion not in _MOVES:
-        print(f"unknown emotion {emotion!r}; pick from {EMOTIONS}")
+        print(f"unknown emotion {emotion!r}; pick from {EMOTIONS} or 'dance'")
         sys.exit(1)
     print(f"[emote] playing {emotion} (with sound)")
     play(emotion, sound=True)

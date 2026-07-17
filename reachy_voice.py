@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -49,17 +50,40 @@ load_env()
 
 REACHY_URL = os.environ.get("REACHY_URL", "http://192.168.1.120:8000").rstrip("/")
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "")
 ELEVEN_MODEL = os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2")
+
+# Voice is switchable at runtime ("switch to the Australian accent").
+# The dict is the mutable source of truth; VOICES maps accent names to
+# ElevenLabs voice ids from Jack's library / the premade set.
+VOICE = {"id": os.environ.get("ELEVEN_VOICE_ID", "")}
+VOICES = {
+    "british": os.environ.get("ELEVEN_VOICE_ID", "EQC5zQOuq9t6MrkD0MPT"),  # British R2
+    "australian": "IKne3meq5aSn9XLyUdCD",   # Charlie — ElevenLabs premade, Aussie
+    "aussie": "IKne3meq5aSn9XLyUdCD",
+    "vibey": "5nKWJuFC6bX0w7HcS5KI",         # "this is vibey"
+}
+
+
+def set_voice(name_or_id: str) -> str | None:
+    """Switch the speaking voice by accent name or raw voice id. Returns the
+    id now in use, or None if the name is unknown."""
+    key = name_or_id.strip().lower()
+    vid = VOICES.get(key)
+    if not vid and len(name_or_id) >= 15 and " " not in name_or_id:
+        vid = name_or_id  # looks like a raw ElevenLabs voice id
+    if not vid:
+        return None
+    VOICE["id"] = vid
+    return vid
 
 
 def tts(text: str) -> bytes:
     """Return MP3 audio bytes for `text` from ElevenLabs."""
     if not ELEVEN_KEY:
         raise RuntimeError("ELEVENLABS_API_KEY not set (see .env)")
-    if not VOICE_ID:
+    if not VOICE["id"]:
         raise RuntimeError("ELEVEN_VOICE_ID not set (see .env)")
-    url = (f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    url = (f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE['id']}"
            f"?output_format=mp3_44100_128")
     body = json.dumps({
         "text": text,
