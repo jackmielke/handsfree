@@ -48,6 +48,14 @@
         "reachy_vibeverse.py"
       ],
       "port": 8774
+    },
+    {
+      "name": "wonder-telegram",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "reachy_telegram.py"
+      ],
+      "port": 0
     }
   ]
 }

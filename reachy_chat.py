@@ -289,9 +289,9 @@ def _typed_turn(text: str) -> None:
     """A chat message typed on the dashboard — same brains as the mic path
     (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
     if _try_resay(text):
-        return
+        return LAST_SPOKEN["text"]
     if _try_voice_switch(text) or _try_dance(text):
-        return
+        return LAST_SPOKEN["text"]
     _log_turn("you", text)
     try:
         if STATE["vibe"] and STATE["vibe_available"]:
@@ -311,6 +311,7 @@ def _typed_turn(text: str) -> None:
         pass
     _log_turn("wonder", spoken)
     _speak_line(spoken)
+    return spoken
 
 
 def _log_turn(who: str, text: str) -> None:
@@ -365,6 +366,18 @@ class _CtrlHandler(BaseHTTPRequestHandler):
                 _log_turn("wonder", f"(re-saying) {last}")
                 threading.Thread(target=_speak_line, args=(last,), daemon=True).start()
                 self._json({"ok": True, "text": last})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/ask"):
+            # Synchronous chat turn — blocks until the reply exists and
+            # returns it (Telegram bridge and other relays need the text).
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                text = (json.loads(self.rfile.read(n)).get("text") or "").strip()
+                if not text:
+                    raise ValueError("text required")
+                reply = _typed_turn(text)
+                self._json({"ok": True, "reply": reply or ""})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
         elif self.path.startswith("/message"):

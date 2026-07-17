@@ -181,15 +181,18 @@ def run():
                            f"agent_key: {AGENT_KEY}")
 
         # answer messages that mention me (once per message)
+        # (world schema: messages carry `speaker` and `body`)
         acted = False
         for m in msgs:
-            text = (m.get("text") or "")
-            mid = m.get("id") or f"{m.get('from','?')}:{text[:30]}"
-            sender = m.get("from") or m.get("name") or "someone"
-            if sender == "Vibey" or mid in replied_to:
+            text = (m.get("body") or "")
+            mid = m.get("id") or f"{m.get('speaker','?')}:{text[:30]}"
+            sender = m.get("speaker") or "someone"
+            if sender in ("Vibey", "world") or m.get("kind") == "event" \
+                    or mid in replied_to:
                 continue
             if re.search(r"\bvibey\b", text, re.I):
                 replied_to.add(mid)
+                _log("mention", f"{sender}: {text[:120]}")
                 line = _short_reply(f"{sender} said: {text}")
                 _api({"action": "say", "agent_key": AGENT_KEY, "text": line})
                 _log("say", f"(to {sender}) {line}")

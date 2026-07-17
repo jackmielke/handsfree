@@ -8,3 +8,4 @@ hand_landmarker.task
 .DS_Store
 *.log
 .openclaw/
+.telegram_state.json
