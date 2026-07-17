@@ -81,6 +81,10 @@ def _set_power(off: bool) -> None:
         # nothing and the robot stays face-down.
         _post(f"{REACHY_URL}/api/motors/set_mode/enabled", timeout=10.0)
         _post(f"{REACHY_URL}/api/move/play/wake_up", timeout=20.0)
+        # face-following + speech wobble are core to feeling alive — they can
+        # get dropped by daemon restarts, so re-assert on every wake.
+        _post(f"{REACHY_URL}/api/media/tracking/enable")
+        _post(f"{REACHY_URL}/api/media/wobbling/enable")
 
 
 def _reboot_robot() -> None:
@@ -97,6 +101,8 @@ def _reboot_robot() -> None:
             break
     _post(f"{REACHY_URL}/api/motors/set_mode/enabled", timeout=10.0)
     _post(f"{REACHY_URL}/api/move/play/wake_up", timeout=20.0)
+    _post(f"{REACHY_URL}/api/media/tracking/enable")
+    _post(f"{REACHY_URL}/api/media/wobbling/enable")
     _post(f"{CHAT_URL}/mute", {"muted": False})
     _post(f"{MEM_URL}/pause", {"paused": False})
     print("[viewer] robot reboot sequence finished", flush=True)
@@ -1037,6 +1043,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     # Make sure face tracking is on so the view has data to show.
     _post(f"{REACHY_URL}/api/media/tracking/enable")
+    _post(f"{REACHY_URL}/api/media/wobbling/enable")
     print(f"[viewer] reachy    = {REACHY_URL}")
     print(f"[viewer] handsfree = {HANDSFREE_URL}")
     print(f"[viewer] open       http://localhost:{PORT}")

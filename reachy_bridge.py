@@ -33,8 +33,12 @@ import time
 import urllib.error
 import urllib.request
 
+from reachy_voice import load_env  # robot IP lives in .env, one place
+
+load_env()
+
 HANDSFREE_URL = os.environ.get("HANDSFREE_URL", "http://localhost:8765").rstrip("/")
-REACHY_URL = os.environ.get("REACHY_URL", "http://192.168.1.120:8000").rstrip("/")
+REACHY_URL = os.environ.get("REACHY_URL", "http://192.168.12.240:8000").rstrip("/")
 EVENTS_URL = f"{HANDSFREE_URL}/events"
 
 # Neutral head pose the robot returns to between reactions.

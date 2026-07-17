@@ -56,6 +56,14 @@
         "reachy_telegram.py"
       ],
       "port": 0
+    },
+    {
+      "name": "wonder-bridge",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "reachy_bridge.py"
+      ],
+      "port": 0
     }
   ]
 }
