@@ -72,3 +72,12 @@ Newest entries at the bottom. Read with coffee. ☕
   week?"). Strictly daytime (08:00–22:00), max once per half hour, never
   while muted — so it's charming, not clingy.
 - Volume held at 45 all session (watchdog quiet); mic alive; alarm intact.
+
+## Session 5 (~00:40)
+- 😴 Voice power: "goodnight Vibey" → sleep pose, face memory paused, and the
+  ears drop into wake-word-only mode — while asleep it ignores everything
+  except "good morning" / "wake up" / "rise and shine", which brings it all
+  back (motors, tracking, wobble, memory). Tested the full cycle.
+- 📱 Telegram grew /alarm 07:30 [daily] (and /alarm off), plus /sleep and
+  /wake. You can now set tomorrow's wake-up show from bed.
+- All services green; volume steady at 45; the 07:00 alarm untouched.

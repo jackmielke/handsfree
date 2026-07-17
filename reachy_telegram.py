@@ -135,6 +135,8 @@ def _handle(chat_id: int, text: str) -> None:
               "/photo — see through my eyes right now\n"
               "/clip — an 8-second video through my eyes\n"
               "/status — stack health\n"
+              "/alarm 07:30 [daily] — wake-up show (/alarm off clears)\n"
+              "/sleep, /wake — power the robot down or up\n"
               "/verse — what's happening in my VibeVerse lobby")
         return
     if low == "/photo":
@@ -159,6 +161,38 @@ def _handle(chat_id: int, text: str) -> None:
             _send_video(chat_id, mp4, "8 seconds through my eyes 🎥")
         except Exception as e:  # noqa: BLE001
             _send(chat_id, f"clip failed ({e})")
+        return
+    if low.startswith("/alarm"):
+        # /alarm 07:30 [daily] sets a wake-up show; /alarm off clears all
+        import re as _re
+        parts = text.split()
+        if len(parts) >= 2 and parts[1].lower() == "off":
+            Path(__file__).parent.joinpath("alarms.json").write_text("[]")
+            _send(chat_id, "alarms cleared")
+            return
+        m = _re.search(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+        if not m:
+            _send(chat_id, "usage: /alarm 07:30  or  /alarm 07:30 daily  or  /alarm off")
+            return
+        hhmm = f"{int(m.group(1)):02d}:{m.group(2)}"
+        repeat = "daily" if "daily" in low else "once"
+        p = Path(__file__).parent / "alarms.json"
+        try:
+            alarms = json.loads(p.read_text())
+        except Exception:
+            alarms = []
+        alarms.append({"time": hhmm, "repeat": repeat,
+                       "label": f"telegram alarm {hhmm}", "song": True})
+        p.write_text(json.dumps(alarms, indent=2))
+        _send(chat_id, f"wake-up show set for {hhmm} ({repeat})")
+        return
+    if low in ("/sleep", "/wake"):
+        try:
+            _post_json("http://localhost:8770/power",
+                       {"off": low == "/sleep"}, timeout=10)
+            _send(chat_id, "going to sleep" if low == "/sleep" else "waking up")
+        except Exception as e:  # noqa: BLE001
+            _send(chat_id, f"power toggle failed ({e})")
         return
     if low == "/status":
         lines = []

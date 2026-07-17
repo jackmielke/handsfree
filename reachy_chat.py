@@ -449,6 +449,75 @@ def _try_music(text: str) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# Voice sleep/wake: "goodnight vibey" folds the robot into its sleep pose and
+# the ears go into wake-word-only mode — the ONLY thing it listens for while
+# asleep is "good morning" / "wake up". Independent of the dashboard button.
+# --------------------------------------------------------------------------- #
+ASLEEP_VOICE = {"on": False}
+_SLEEP_RE = re.compile(r"\b(good ?night|go to sleep|bed ?time)\b", re.I)
+_WAKE_RE = re.compile(r"\b(good ?morning|wake up|rise and shine)\b", re.I)
+
+
+def _robot_post(path: str, timeout: float = 20.0) -> None:
+    try:
+        url = os.environ.get("REACHY_URL", "http://192.168.12.240:8000").rstrip("/")
+        req = urllib.request.Request(f"{url}{path}", data=b"", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=timeout).read()
+    except Exception as e:
+        print(f"[power] {path} failed: {e}", flush=True)
+
+
+def _voice_sleep() -> None:
+    ASLEEP_VOICE["on"] = True
+    _log_turn("wonder", "(goodnight — say 'good morning' to wake me)")
+    _speak_line("Goodnight! Say good morning when you need me.")
+    time.sleep(3.5)
+    try:
+        import urllib.request as _u
+        _u.urlopen(_u.Request("http://localhost:8773/pause",
+                              data=b'{"paused": true}', method="POST",
+                              headers={"Content-Type": "application/json"}),
+                   timeout=5).read()
+    except Exception:
+        pass
+    _robot_post("/api/media/stop_sound", 8)
+    _robot_post("/api/move/play/goto_sleep")
+
+
+def _voice_wake() -> None:
+    ASLEEP_VOICE["on"] = False
+    _robot_post("/api/motors/set_mode/enabled", 10)
+    _robot_post("/api/move/play/wake_up")
+    _robot_post("/api/media/tracking/enable", 8)
+    _robot_post("/api/media/wobbling/enable", 8)
+    try:
+        import urllib.request as _u
+        _u.urlopen(_u.Request("http://localhost:8773/pause",
+                              data=b'{"paused": false}', method="POST",
+                              headers={"Content-Type": "application/json"}),
+                   timeout=5).read()
+    except Exception:
+        pass
+    time.sleep(2)
+    _log_turn("wonder", "(good morning!)")
+    _speak_line("Good morning! I'm up.")
+
+
+def _try_power_voice(text: str) -> bool:
+    if ASLEEP_VOICE["on"]:
+        if _WAKE_RE.search(text):
+            _log_turn("you", text)
+            _voice_wake()
+        return True   # asleep: swallow everything else
+    if _SLEEP_RE.search(text):
+        _log_turn("you", text)
+        _voice_sleep()
+        return True
+    return False
+
+
 def _try_resay(text: str) -> bool:
     """If `text` is a re-say request, replay the last line. True if handled."""
     if not _RESAY_RE.search(text):
@@ -470,6 +539,8 @@ MUTED_EXT = {"until": 0.0}
 def _typed_turn(text: str) -> None:
     """A chat message typed on the dashboard — same brains as the mic path
     (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
+    if _try_power_voice(text):
+        return LAST_SPOKEN["text"]
     if _try_resay(text):
         return LAST_SPOKEN["text"]
     if _try_game(text):
@@ -918,6 +989,8 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
     if _is_echo(text):
         print(f"[chat] ignored own echo: {text!r}", flush=True)
         return muted_until
+    if _try_power_voice(text):
+        return muted_until
     if _try_resay(text):
         return muted_until
     if _try_game(text):
@@ -960,6 +1033,8 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         return muted_until
     if _is_echo(text):
         print(f"[chat] ignored own echo: {text!r}", flush=True)
+        return muted_until
+    if _try_power_voice(text):
         return muted_until
     if _try_resay(text):
         return muted_until
