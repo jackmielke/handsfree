@@ -7,3 +7,4 @@ face_landmarker.task
 hand_landmarker.task
 .DS_Store
 *.log
+.openclaw/

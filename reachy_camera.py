@@ -23,13 +23,44 @@ Env overrides:
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from reachy_mini import ReachyMini
+from reachy_voice import load_env  # .env loader — keeps robot IP in one place
 
-REACHY_HOST = os.environ.get("REACHY_HOST", "192.168.1.120")
+load_env()
+
+# This bridge only wants VIDEO. The SDK's WebRTC client also builds an audio
+# send chain whose silent `audiotestsrc` streams continuous audio to the
+# robot — and the daemon gives incoming client audio barge-in priority over
+# the speaker, which was cutting off Vibey's speech moments after it started.
+# Neuter the chain before any client is constructed.
+try:
+    from reachy_mini.media.webrtc_client_gstreamer import GstWebRTCClient
+
+    def _no_audio_send(self):  # noqa: ANN001
+        self.logger.info("audio send chain disabled (video-only bridge)")
+
+    GstWebRTCClient._setup_audio_send_chain = _no_audio_send
+except Exception as _e:  # noqa: BLE001 - SDK layout changed; better loud than broken
+    print(f"[camera] WARNING: could not disable audio send chain: {_e}", flush=True)
+
+
+def _default_host() -> str:
+    """REACHY_HOST if set, else the host part of REACHY_URL (the variable the
+    rest of the stack uses), so the camera doesn't need its own IP config."""
+    host = os.environ.get("REACHY_HOST")
+    if host:
+        return host
+    url = os.environ.get("REACHY_URL", "")
+    m = re.match(r"https?://([^:/]+)", url)
+    return m.group(1) if m else "192.168.12.240"
+
+
+REACHY_HOST = _default_host()
 CAM_PORT = int(os.environ.get("CAM_PORT", "8771"))
 
 # Shared latest frame — one producer thread fills it, any number of HTTP

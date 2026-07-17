@@ -57,6 +57,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import warnings
 from datetime import datetime, timezone
@@ -91,6 +92,10 @@ MEM_PORT = int(os.environ.get("MEM_PORT", "8773"))
 # math didn't need to change).
 CURRENT_PEOPLE: list[dict] = []
 _current_lock = threading.Lock()
+
+# Sleep switch — while paused the loop skips detection and greetings entirely
+# (set from the dashboard's power button via POST /pause).
+PAUSED = {"on": False}
 
 
 def _set_current_people(people: list[dict]):
@@ -211,6 +216,56 @@ def sb_delete_face(face_id: str) -> None:
     urllib.request.urlopen(req, timeout=10).read()
 
 
+def sb_find_face_by_name(name: str) -> dict | None:
+    url = (f"{SUPABASE_URL}/rest/v1/faces"
+           f"?name=eq.{urllib.parse.quote(name)}&select=id,name,times_seen&limit=1")
+    req = urllib.request.Request(url, headers=_sb_headers())
+    with urllib.request.urlopen(req, timeout=10) as r:
+        rows = json.loads(r.read() or b"[]")
+    return rows[0] if rows else None
+
+
+def sb_merge_faces(src_id: str, dst_id: str) -> None:
+    """Fold identity src into dst: samples move over, sighting counts add up,
+    src disappears. Used when a face gets named after someone who already
+    exists — same name means same person, one identity, many photos."""
+    # move all samples
+    body = json.dumps({"face_id": dst_id}).encode()
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/face_samples?face_id=eq.{src_id}",
+        data=body, method="PATCH",
+        headers=_sb_headers({"Prefer": "return=minimal"}))
+    urllib.request.urlopen(req, timeout=10).read()
+
+    # add sighting counts
+    def _times(fid):
+        u = f"{SUPABASE_URL}/rest/v1/faces?id=eq.{fid}&select=times_seen"
+        rq = urllib.request.Request(u, headers=_sb_headers())
+        with urllib.request.urlopen(rq, timeout=10) as r:
+            rows = json.loads(r.read() or b"[]")
+        return rows[0]["times_seen"] if rows else 0
+    total = _times(src_id) + _times(dst_id)
+    body = json.dumps({"times_seen": total}).encode()
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/faces?id=eq.{dst_id}", data=body, method="PATCH",
+        headers=_sb_headers({"Prefer": "return=minimal"}))
+    urllib.request.urlopen(req, timeout=10).read()
+
+    sb_delete_face(src_id)
+
+    # merged person may now exceed the sample cap — trim oldest
+    url = (f"{SUPABASE_URL}/rest/v1/face_samples"
+           f"?face_id=eq.{dst_id}&select=id,created_at&order=created_at.asc")
+    req = urllib.request.Request(url, headers=_sb_headers())
+    with urllib.request.urlopen(req, timeout=10) as r:
+        rows = json.loads(r.read() or b"[]")
+    for row in rows[:-MAX_SAMPLES] if len(rows) > MAX_SAMPLES else []:
+        dreq = urllib.request.Request(
+            f"{SUPABASE_URL}/rest/v1/face_samples?id=eq.{row['id']}",
+            method="DELETE", headers=_sb_headers({"Prefer": "return=minimal"}))
+        urllib.request.urlopen(dreq, timeout=10).read()
+
+
 # --------------------------------------------------------------------------- #
 # Perception helpers                                                           #
 # --------------------------------------------------------------------------- #
@@ -318,18 +373,44 @@ class _MemHandler(BaseHTTPRequestHandler):
                 self._json(names)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
+        elif self.path.startswith("/samples"):
+            # All photos for one person: /samples?face_id=<uuid>
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                face_id = (q.get("face_id") or [""])[0]
+                if not face_id:
+                    raise ValueError("face_id required")
+                url = (f"{SUPABASE_URL}/rest/v1/face_samples"
+                       f"?face_id=eq.{face_id}"
+                       "&select=id,snapshot,created_at&order=created_at.desc")
+                req = urllib.request.Request(url, headers=_sb_headers())
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    self._json(json.loads(r.read() or b"[]"))
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
         elif self.path.startswith("/people"):
             try:
                 faces = sb_get_faces()
-                samples = sb_get_samples()
+                # sample photos (no embeddings — keep the payload sane):
+                # newest first, up to 3 shown per person as a photo clump
+                url = (f"{SUPABASE_URL}/rest/v1/face_samples"
+                       "?select=face_id,snapshot,created_at&order=created_at.desc")
+                req = urllib.request.Request(url, headers=_sb_headers())
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    all_samples = json.loads(r.read() or b"[]")
                 counts: dict[str, int] = {}
-                for s in samples:
-                    counts[s["face_id"]] = counts.get(s["face_id"], 0) + 1
+                photos: dict[str, list] = {}
+                for s in all_samples:
+                    fid = s["face_id"]
+                    counts[fid] = counts.get(fid, 0) + 1
+                    if s.get("snapshot") and len(photos.setdefault(fid, [])) < 3:
+                        photos[fid].append(s["snapshot"])
                 people = [{
                     "id": r["id"],
                     "name": r.get("name"),
                     "times_seen": r.get("times_seen", 1),
-                    "snapshot": r.get("snapshot"),
+                    "snapshot": (photos.get(r["id"]) or [r.get("snapshot")])[0],
+                    "photos": photos.get(r["id"], []),
                     "sample_count": counts.get(r["id"], 0),
                 } for r in faces]
                 people.sort(key=lambda p: p["times_seen"], reverse=True)
@@ -353,11 +434,23 @@ class _MemHandler(BaseHTTPRequestHandler):
                 if not (name and face_id):
                     raise ValueError("need name (and a face_id, or exactly "
                                       "one face currently in view)")
-                sb_name_face(face_id, name)
+                merged = False
+                existing = sb_find_face_by_name(name)
+                if existing and existing["id"] != face_id:
+                    # Same name = same person: fold this face into the
+                    # existing identity instead of keeping a duplicate.
+                    sb_merge_faces(face_id, existing["id"])
+                    merged = True
+                    old_id, face_id = face_id, existing["id"]
+                    print(f"[memory] merged {old_id} into {name} ({face_id})",
+                          flush=True)
+                else:
+                    sb_name_face(face_id, name)
                 live = False
                 with _current_lock:
                     for p in CURRENT_PEOPLE:
-                        if p["face_id"] == face_id:
+                        if p["face_id"] == face_id or (merged and p["face_id"] == old_id):
+                            p["face_id"] = face_id
                             p["name"] = name
                             live = time.time() - p["ts"] < PERSON_FRESH_S
                 print(f"[memory] named {face_id} -> {name}", flush=True)
@@ -371,6 +464,52 @@ class _MemHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                 self._json({"ok": True, "face_id": face_id, "name": name})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/pause"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n))
+                PAUSED["on"] = bool(body.get("paused"))
+                if PAUSED["on"]:
+                    _set_current_people([])
+                print(f"[memory] {'paused' if PAUSED['on'] else 'resumed'}", flush=True)
+                self._json({"ok": True, "paused": PAUSED["on"]})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/deletesample"):
+            # Forget ONE photo (sample) — the person and their other photos
+            # stay. The last remaining photo is protected: deleting it would
+            # leave the person unrecognizable, so that path is the full
+            # delete-person flow instead.
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n))
+                sample_id = body.get("sample_id")
+                if not sample_id:
+                    raise ValueError("sample_id required")
+                url = (f"{SUPABASE_URL}/rest/v1/face_samples"
+                       f"?id=eq.{sample_id}&select=face_id")
+                req = urllib.request.Request(url, headers=_sb_headers())
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    rows = json.loads(r.read() or b"[]")
+                if not rows:
+                    raise ValueError("sample not found")
+                face_id = rows[0]["face_id"]
+                cnt_url = (f"{SUPABASE_URL}/rest/v1/face_samples"
+                           f"?face_id=eq.{face_id}&select=id")
+                req = urllib.request.Request(cnt_url, headers=_sb_headers())
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    total = len(json.loads(r.read() or b"[]"))
+                if total <= 1:
+                    raise ValueError("last photo — delete the person instead")
+                dreq = urllib.request.Request(
+                    f"{SUPABASE_URL}/rest/v1/face_samples?id=eq.{sample_id}",
+                    method="DELETE",
+                    headers=_sb_headers({"Prefer": "return=minimal"}))
+                urllib.request.urlopen(dreq, timeout=10).read()
+                print(f"[memory] deleted sample {sample_id} of {face_id}", flush=True)
+                self._json({"ok": True, "remaining": total - 1})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
         elif self.path.startswith("/deleteface"):
@@ -416,6 +555,8 @@ def run():
 
     while True:
         time.sleep(POLL_INTERVAL)
+        if PAUSED["on"]:
+            continue
         jpg = snapshot_jpeg()
         if not jpg:
             continue

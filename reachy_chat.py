@@ -77,8 +77,195 @@ STATE = {
     "listening": False,
     "fast": os.environ.get("FAST_MODE", "").strip() == "1",
     "fast_available": bool(os.environ.get("ELEVEN_AGENT_ID")),
+    "vibe": False,
+    "vibe_available": False,  # set at startup if the openclaw CLI is found
+    "think_aloud": False,     # when True, Vibey narrates her thinking before each reply
+    "mic_level": 0.0,         # smoothed RMS — dashboard meter for "can it hear me?"
+    "mic_threshold": 0.0,     # the speech gate, so the meter can show the bar
 }
+
+# Vibe mode: route turns to the "vibe" OpenClaw agent — a full agentic brain
+# whose workspace is this very repo, so it can improve the robot's own code
+# mid-conversation. Slower than the other brains; wildly more capable.
+OPENCLAW_BIN = os.environ.get(
+    "OPENCLAW_BIN",
+    os.path.expanduser("~/.local/share/fnm/node-versions/v22.22.0/"
+                       "installation/bin/openclaw"))
+VIBE_SESSION_KEY = os.environ.get("VIBE_SESSION_KEY", "vibe:reachy-voice")
+
+
+def _vibe_reply(text: str) -> str:
+    """One OpenClaw agent turn. Blocking — Vibe may think/act for a while."""
+    # openclaw's launcher shebangs `env node`; node lives next to the openclaw
+    # bin (fnm-managed), which is NOT on PATH when this service is started
+    # outside a login shell — prepend it or every vibe turn dies with
+    # "env: node: No such file or directory".
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(OPENCLAW_BIN) + os.pathsep + env.get("PATH", "")
+    r = subprocess.run(
+        [OPENCLAW_BIN, "agent", "--agent", "vibe",
+         "--session-key", VIBE_SESSION_KEY,
+         "-m", f"(spoken to you through the robot's mic) {text}",
+         "--timeout", "240", "--json"],
+        capture_output=True, text=True, timeout=300, env=env)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[:200])
+    # stdout may carry config-warning noise before the JSON — find the object
+    out = r.stdout[r.stdout.find("{"):]
+    d = json.loads(out)
+    payloads = (d.get("result") or {}).get("payloads") or []
+    reply = " ".join(p.get("text", "") for p in payloads).strip()
+    # Spoken voice: agent replies sometimes come back as markdown — strip
+    # emoji, bold/italic markers, backticks, headers, and links so TTS (and
+    # re-say) reads clean prose instead of "asterisk asterisk quote…".
+    reply = re.sub(r"[\U0001F000-\U0001FAFF☀-➿]", "", reply)
+    reply = re.sub(r"\*\*([^*]+)\*\*", r"\1", reply)
+    reply = re.sub(r"\*([^*]+)\*", r"\1", reply)
+    reply = re.sub(r"`+([^`]*)`+", r"\1", reply)
+    reply = re.sub(r"^#+\s*", "", reply, flags=re.M)
+    reply = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", reply)
+    return reply.strip()
 TRANSCRIPT: deque = deque(maxlen=40)   # {"who": "you"|"wonder", "text", "ts"}
+
+VIBE_SESSIONS_DIR = os.path.expanduser("~/.openclaw/agents/vibe/sessions")
+
+
+def _vibe_thoughts(limit: int = 80) -> list[dict]:
+    """Vibey's inner monologue: thinking blocks, tool calls, and results from
+    the newest OpenClaw session log, compacted for the dashboard's brain
+    panel. Read-only peek at ~/.openclaw/agents/vibe/sessions."""
+    try:
+        files = [f for f in os.listdir(VIBE_SESSIONS_DIR)
+                 if f.endswith(".jsonl") and "trajectory" not in f]
+        if not files:
+            return []
+        newest = max(files, key=lambda f: os.path.getmtime(
+            os.path.join(VIBE_SESSIONS_DIR, f)))
+        events: list[dict] = []
+        with open(os.path.join(VIBE_SESSIONS_DIR, newest)) as fh:
+            for ln in fh:
+                try:
+                    d = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                m = d.get("message") or {}
+                role, content = m.get("role"), m.get("content")
+                ts = d.get("timestamp")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                if not isinstance(content, list):
+                    continue
+                for b in content:
+                    t = b.get("type")
+                    if role == "assistant" and t == "thinking" and b.get("thinking"):
+                        events.append({"ts": ts, "kind": "thinking",
+                                       "text": b["thinking"][:500]})
+                    elif role == "assistant" and t == "toolCall":
+                        args = b.get("arguments") or {}
+                        gist = (args.get("command") or args.get("path")
+                                or args.get("file_path")
+                                or json.dumps(args)[:160])
+                        events.append({"ts": ts, "kind": "tool",
+                                       "text": f"{b.get('name', 'tool')} → {str(gist)[:240]}"})
+                    elif role == "assistant" and t == "text" and b.get("text"):
+                        events.append({"ts": ts, "kind": "say",
+                                       "text": b["text"][:300]})
+                    elif role == "toolResult" and t == "text" and b.get("text"):
+                        events.append({"ts": ts, "kind": "result",
+                                       "text": b["text"][:200]})
+                    elif role == "user" and t == "text" and b.get("text"):
+                        events.append({"ts": ts, "kind": "user",
+                                       "text": b["text"][:200]})
+        return events[-limit:]
+    except Exception as e:  # noqa: BLE001
+        return [{"ts": None, "kind": "error", "text": str(e)}]
+
+# Set in main(); lets the control API run typed chat turns through the same
+# brain the mic uses.
+BRAIN = None
+
+# Last line Vibey spoke, for "re-say that" (voice, text, or the 🔁 button)
+# and for echo rejection (`spoken_until` = when the clip finished playing).
+LAST_SPOKEN = {"text": "", "spoken_until": 0.0}
+_RESAY_RE = re.compile(
+    r"\b(re-?say( that| it)?|say (that|it) again|repeat (that|it))\b", re.I)
+
+
+def _speak_line(text: str) -> None:
+    """Speak + remember, and extend the mic-mute window so the robot doesn't
+    hear its own voice. Every spoken reply should go through here. A robot
+    that's offline mid-sentence must never kill the service — speech failures
+    are logged and swallowed."""
+    LAST_SPOKEN["text"] = text
+    try:
+        duration = say(text) or max(2.0, len(text.split()) / 2.4)
+    except Exception as e:  # noqa: BLE001 - robot offline/moving is routine
+        print(f"[voice] speak failed (robot offline?): {e}", flush=True)
+        return
+    # +2.5s covers upload + playback start latency on the robot side; the
+    # duration itself is exact (computed from the MP3 byte length).
+    until = time.time() + duration + 2.5
+    MUTED_EXT["until"] = until
+    LAST_SPOKEN["spoken_until"] = until
+
+
+def _is_echo(heard: str) -> bool:
+    """True if `heard` is (mostly) the robot's own last line leaking back
+    into the mic — the mute window usually stops this, but playback can run
+    long; token overlap catches whatever slips through."""
+    last = LAST_SPOKEN["text"]
+    if not last or time.time() - LAST_SPOKEN["spoken_until"] > 12.0:
+        return False
+    tok = lambda s: {w for w in re.findall(r"[a-z']+", s.lower()) if len(w) > 2}
+    h, l = tok(heard), tok(last)
+    if not h:
+        return False
+    overlap = len(h & l) / len(h)
+    return overlap >= 0.7
+
+
+def _try_resay(text: str) -> bool:
+    """If `text` is a re-say request, replay the last line. True if handled."""
+    if not _RESAY_RE.search(text):
+        return False
+    last = LAST_SPOKEN["text"]
+    if last:
+        _log_turn("you", text)
+        _log_turn("wonder", f"(re-saying) {last}")
+        _speak_line(last)
+    else:
+        _log_turn("you", text)
+        _speak_line("I haven't said anything yet!")
+    return True
+# Mic-mute window extended by typed turns (so the robot doesn't hear and
+# answer its own spoken reply). The mic loop honors max(this, its own timer).
+MUTED_EXT = {"until": 0.0}
+
+
+def _typed_turn(text: str) -> None:
+    """A chat message typed on the dashboard — same brains as the mic path
+    (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
+    if _try_resay(text):
+        return
+    _log_turn("you", text)
+    try:
+        if STATE["vibe"] and STATE["vibe_available"]:
+            reply = _vibe_reply(text)
+        elif BRAIN is not None:
+            reply = BRAIN.reply(text)
+        else:
+            reply = "My brain isn't hooked up yet."
+    except Exception as e:
+        print(f"[msg] error: {e}", flush=True)
+        reply = "Hmm, that broke something. Try again?"
+    emote, spoken = _extract_emote(reply)
+    try:
+        from reachy_emotes import play as play_emote
+        play_emote(emote or _guess_emote(spoken))
+    except Exception:
+        pass
+    _log_turn("wonder", spoken)
+    _speak_line(spoken)
 
 
 def _log_turn(who: str, text: str) -> None:
@@ -100,6 +287,8 @@ class _CtrlHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/state"):
             self._json({**STATE, "transcript": list(TRANSCRIPT)})
+        elif self.path.startswith("/vibelog"):
+            self._json({"events": _vibe_thoughts()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -118,7 +307,51 @@ class _CtrlHandler(BaseHTTPRequestHandler):
                 if fast and not STATE["fast_available"]:
                     raise ValueError("ELEVEN_AGENT_ID not configured")
                 STATE["fast"] = fast
+                if fast:
+                    STATE["vibe"] = False   # modes are mutually exclusive
                 self._json({"ok": True, "fast": STATE["fast"]})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/resay"):
+            try:
+                last = LAST_SPOKEN["text"]
+                if not last:
+                    raise ValueError("nothing said yet")
+                _log_turn("wonder", f"(re-saying) {last}")
+                threading.Thread(target=_speak_line, args=(last,), daemon=True).start()
+                self._json({"ok": True, "text": last})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/message"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                text = (json.loads(self.rfile.read(n)).get("text") or "").strip()
+                if not text:
+                    raise ValueError("text required")
+                # async — vibe turns can take a minute; the dashboard's
+                # transcript polling picks up the reply when it lands.
+                threading.Thread(target=_typed_turn, args=(text,), daemon=True).start()
+                self._json({"ok": True, "queued": True})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/thinkaloud"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                think = bool(json.loads(self.rfile.read(n)).get("think_aloud"))
+                STATE["think_aloud"] = think
+                self._json({"ok": True, "think_aloud": STATE["think_aloud"]})
+            except Exception as e:
+                self._json({"error": str(e)}, 400)
+        elif self.path.startswith("/vibemode"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                vibe = bool(json.loads(self.rfile.read(n)).get("vibe"))
+                if vibe and not STATE["vibe_available"]:
+                    raise ValueError("openclaw CLI not found")
+                STATE["vibe"] = vibe
+                if vibe:
+                    STATE["fast"] = False   # modes are mutually exclusive
+                self._json({"ok": True, "vibe": STATE["vibe"]})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
         else:
@@ -134,21 +367,63 @@ def _start_ctrl_server():
 SR = 16000
 BLOCK_S = 0.1
 BLOCK_N = int(SR * BLOCK_S)
-SPEECH_RMS = 0.012
+# Speech gate for the laptop mic. 0.012 proved too high to catch someone
+# talking across the room (near the robot, far from the laptop) — measured
+# quiet-room floor here is ~0.006. Tune via env if it false-triggers.
+SPEECH_RMS = float(os.environ.get("SPEECH_RMS", "0.008"))
 SILENCE_HANG_S = 0.8          # slightly longer than handsfree's 0.6 — full sentences
 PRE_ROLL_S = 0.25
 MIN_SEGMENT_S = 0.5           # ignore coughs/taps
 MAX_SEGMENT_S = 20.0
 
 PERSONA = (
-    "You are Wonder, a small Reachy Mini robot with antennas, sitting on a desk "
+    "You are Vibey, a small Reachy Mini robot with antennas, sitting on a desk "
     "in Jack's living room. You speak out loud through a speaker in a British-"
     "robot voice, so keep replies SHORT — one or two sentences, conversational, "
     "no lists, no markdown, no emoji. You are curious, playful, and a little "
     "cheeky. You can see through your camera, hear through your mics, remember "
     "faces, and dance when there's music. If asked to do something physical you "
-    "can't do yet, be honest but game about it."
+    "can't do yet, be honest but game about it.\n"
+    "Start EVERY reply with exactly one emotion tag — [happy], [excited], "
+    "[curious], [sad], or [smug] — matching the feeling of your reply. It is "
+    "stripped before speaking and drives your body language, so pick honestly "
+    "and vary it. Example: '[curious] Ooh, what's that you're holding?'"
 )
+
+# [tag] at the start of a reply → body language. Parsed and stripped here.
+_EMOTE_RE = re.compile(r"^\s*\[(happy|excited|curious|sad|smug)\]\s*", re.I)
+
+# Think-aloud: optional [thought: ...] prefix spoken before the main reply.
+_THOUGHT_RE = re.compile(r"\[thought:\s*(.*?)\]\s*", re.I | re.DOTALL)
+
+# Voice commands to toggle think-aloud mode.
+_THINK_ON_RE = re.compile(
+    r"\b(think\s+out\s+loud|think\s+aloud|start\s+thinking\s+out\s+loud)\b", re.I)
+_THINK_OFF_RE = re.compile(
+    r"\b(stop\s+thinking\s+out\s+loud|stop\s+thinking\s+aloud|stop\s+narrating)\b", re.I)
+
+
+def _extract_emote(reply: str) -> tuple[str | None, str]:
+    m = _EMOTE_RE.match(reply)
+    if m:
+        return m.group(1).lower(), reply[m.end():].strip()
+    return None, reply
+
+
+def _guess_emote(text: str) -> str:
+    """Cheap sentiment for fast mode, where the ElevenLabs agent's replies
+    aren't tagged. Keyword/punctuation heuristics — good enough for body
+    language, not for anything that matters."""
+    t = text.lower()
+    if any(w in t for w in ("sorry", "sad", "miss", "unfortunately", "afraid")):
+        return "sad"
+    if any(w in t for w in ("what", "why", "how", "hmm", "?")):
+        return "curious"
+    if any(w in t for w in ("of course", "naturally", "obviously", "told you")):
+        return "smug"
+    if t.count("!") >= 2 or any(w in t for w in ("wow", "let's go", "amazing", "yes!")):
+        return "excited"
+    return "happy"
 
 
 # --------------------------------------------------------------------------- #
@@ -197,15 +472,25 @@ class Brain:
         return out
 
     def _persona(self) -> str:
+        base = PERSONA
+        if STATE.get("think_aloud"):
+            base += (
+                "\n\nThink-aloud mode is ON. Before your reply, add a single "
+                "short sentence of internal narration in [thought: ...] format — "
+                "what you're actually thinking or noticing as you process the "
+                "question. Keep it natural and spoken-word friendly; no lists or "
+                "markdown inside the thought. Example: "
+                "'[thought: Hmm, that's an interesting one — let me work through it.] "
+                "[happy] Here's what I think...'")
         names = _current_people_names()
         if names:
             who = names[0] if len(names) == 1 else (
                 ", ".join(names[:-1]) + f" and {names[-1]}")
-            return (f"{PERSONA}\n\nYour camera currently recognizes "
+            return (f"{base}\n\nYour camera currently recognizes "
                     f"{'the person' if len(names) == 1 else 'these people'} "
                     f"in front of you: {who}. Address them by name "
                     f"naturally (don't overdo it).")
-        return PERSONA
+        return base
 
     def _api_reply(self) -> str:
         resp = self.client.messages.create(
@@ -352,6 +637,34 @@ def transcribe(audio: np.ndarray) -> str:
     return " ".join(s.text.strip() for s in segments).strip()
 
 
+def _speak_thought(thought: str) -> None:
+    """Speak a think-aloud narration with the 'thinking' emote, then pause."""
+    try:
+        from reachy_emotes import play as play_emote
+        play_emote("thinking", sound=True)
+    except Exception:
+        pass
+    _speak_line(thought)
+    time.sleep(0.4)   # brief gap between thought and reply
+
+
+def _check_think_aloud_toggle(text: str) -> bool:
+    """If the utterance is a think-aloud toggle command, handle it and return True."""
+    if _THINK_ON_RE.search(text):
+        STATE["think_aloud"] = True
+        _log_turn("you", text)
+        _log_turn("wonder", "Think-aloud mode on — I'll narrate my thoughts before each reply.")
+        _speak_line("Think-aloud mode on — I'll narrate my thoughts before each reply.")
+        return True
+    if _THINK_OFF_RE.search(text):
+        STATE["think_aloud"] = False
+        _log_turn("you", text)
+        _log_turn("wonder", "Got it — going quiet inside.")
+        _speak_line("Got it — going quiet inside.")
+        return True
+    return False
+
+
 def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) -> float:
     """Whisper transcription → Claude reply → ElevenLabs TTS. Returns the
     updated muted_until deadline."""
@@ -360,14 +673,69 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
     print(f"[chat] heard ({time.time()-t0:.1f}s): {text!r}", flush=True)
     if not (text and len(text.split()) >= 2 and _passes_wake(text)):
         return muted_until
+    if _is_echo(text):
+        print(f"[chat] ignored own echo: {text!r}", flush=True)
+        return muted_until
+    if _try_resay(text):
+        return muted_until
+    if _check_think_aloud_toggle(text):
+        return muted_until
     _log_turn("you", text)
     t1 = time.time()
     reply = brain.reply(text)
     print(f"[chat] reply ({time.time()-t1:.1f}s): {reply!r}", flush=True)
     if not reply:
         return muted_until
+    # Extract and speak think-aloud thought first, if present.
+    thought_m = _THOUGHT_RE.search(reply)
+    if thought_m and STATE.get("think_aloud"):
+        _speak_thought(thought_m.group(1).strip())
+        reply = _THOUGHT_RE.sub("", reply).strip()
+    emote, spoken = _extract_emote(reply)
+    if emote:
+        try:
+            from reachy_emotes import play as play_emote
+            play_emote(emote)   # motion only — runs while the line is spoken
+        except Exception as e:
+            print(f"[chat] emote failed: {e}", flush=True)
+    _log_turn("wonder", spoken)
+    _speak_line(spoken)
+    return time.time() + max(2.0, len(spoken.split()) / 2.4) + 1.5
+
+
+def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
+    """Whisper transcription → OpenClaw 'vibe' agent (agentic, can edit its
+    own code) → ElevenLabs TTS. Slow but powerful; Wonder acks first so the
+    silence while Vibe works doesn't feel like a crash."""
+    t0 = time.time()
+    text = transcribe(audio)
+    print(f"[vibe] heard ({time.time()-t0:.1f}s): {text!r}", flush=True)
+    if not (text and len(text.split()) >= 2 and _passes_wake(text)):
+        return muted_until
+    if _is_echo(text):
+        print(f"[chat] ignored own echo: {text!r}", flush=True)
+        return muted_until
+    if _try_resay(text):
+        return muted_until
+    if _check_think_aloud_toggle(text):
+        return muted_until
+    _log_turn("you", text)
+    t1 = time.time()
+    try:
+        reply = _vibe_reply(text)
+    except Exception as e:
+        print(f"[vibe] error: {e}", flush=True)
+        reply = "Hmm, my vibe brain hit a snag. Say that again?"
+    print(f"[vibe] reply ({time.time()-t1:.1f}s): {reply!r}", flush=True)
+    if not reply:
+        return muted_until
+    try:
+        from reachy_emotes import play as play_emote
+        play_emote(_guess_emote(reply))
+    except Exception:
+        pass
     _log_turn("wonder", reply)
-    say(reply)
+    _speak_line(reply)
     return time.time() + max(2.0, len(reply.split()) / 2.4) + 1.5
 
 
@@ -389,6 +757,12 @@ def _handle_fast_turn(agent: "FastAgent", audio: np.ndarray, muted_until: float)
         return muted_until
     if result["agent_text"]:
         _log_turn("wonder", result["agent_text"])
+        LAST_SPOKEN["text"] = result["agent_text"]   # so "re-say that" works
+        try:
+            from reachy_emotes import play as play_emote
+            play_emote(_guess_emote(result["agent_text"]))
+        except Exception as e:
+            print(f"[fast] emote failed: {e}", flush=True)
     name = f"fast_{int(time.time()*1000)}.wav"
     try:
         upload_sound(result["wav"], name)
@@ -405,10 +779,16 @@ def _handle_fast_turn(agent: "FastAgent", audio: np.ndarray, muted_until: float)
 # --------------------------------------------------------------------------- #
 def main():
     _start_ctrl_server()
+    global BRAIN
     brain = Brain()
+    BRAIN = brain
     fast_agent = FastAgent()
     STATE["mode"] = brain.mode
-    say("Voice chat is on. Talk to me!")
+    STATE["vibe_available"] = os.path.exists(OPENCLAW_BIN)
+    print(f"[vibe] openclaw {'found' if STATE['vibe_available'] else 'NOT found'} "
+          f"at {OPENCLAW_BIN}", flush=True)
+    STATE["mic_threshold"] = SPEECH_RMS
+    _speak_line("Vibey here. Talk to me!")
     muted_until = time.time() + 3.0   # let the greeting finish
 
     stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32",
@@ -424,13 +804,16 @@ def main():
     while True:
         data, _ = stream.read(BLOCK_N)
         now = time.time()
-        STATE["speaking"] = now < muted_until
+        effective_muted_until = max(muted_until, MUTED_EXT["until"])
+        STATE["speaking"] = now < effective_muted_until
         STATE["listening"] = not STATE["speaking"] and not STATE["muted"]
-        if now < muted_until or STATE["muted"]:   # Wonder talking, or user muted
+        if now < effective_muted_until or STATE["muted"]:  # Wonder talking, or user muted
             pre_roll.clear(); buf = []; in_speech = False
             continue
 
         rms = float(np.sqrt(np.mean(data ** 2)))
+        # light smoothing so the dashboard meter reads steadily
+        STATE["mic_level"] = round(0.6 * STATE["mic_level"] + 0.4 * rms, 5)
         if rms > SPEECH_RMS:
             if not in_speech:
                 in_speech = True
@@ -445,7 +828,9 @@ def main():
         if in_speech and (silence_s >= SILENCE_HANG_S or segment_s >= MAX_SEGMENT_S):
             if segment_s >= MIN_SEGMENT_S and buf:
                 audio = np.concatenate([b[:, 0] for b in buf]).astype(np.float32)
-                if STATE["fast"]:
+                if STATE["vibe"]:
+                    muted_until = _handle_vibe_turn(audio, muted_until)
+                elif STATE["fast"]:
                     muted_until = _handle_fast_turn(fast_agent, audio, muted_until)
                 else:
                     muted_until = _handle_brain_turn(brain, audio, muted_until)

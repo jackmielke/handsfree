@@ -7,7 +7,7 @@ and played on the robot's speaker — so the sound comes out of Wonder's body, n
 your laptop. Stdlib only; no SDK/venv required.
 
 CLI:
-    python3 reachy_voice.py "Hey, I'm Wonder. Nice to meet you."
+    python3 reachy_voice.py "Hey, I'm Vibey. Nice to meet you."
 
 As a module:
     from reachy_voice import say
@@ -107,20 +107,23 @@ def play_sound(name: str) -> None:
         r.read()
 
 
-def say(text: str, wait: bool = False) -> None:
-    """Speak `text` on the robot. If `wait`, block roughly the clip length."""
+def say(text: str, wait: bool = False) -> float:
+    """Speak `text` on the robot. Returns the clip duration in seconds —
+    accurate, from the MP3 byte length (128kbps CBR → 16000 bytes/sec), so
+    callers can mute the mic for exactly as long as the robot is talking.
+    If `wait`, also block for roughly that long."""
     mp3 = tts(text)
+    duration = len(mp3) / 16000.0
     name = f"wonder_{uuid.uuid4().hex[:8]}.mp3"
     upload_sound(mp3, name)
     play_sound(name)
     if wait:
-        # ~ rough estimate: 150 words/min; enough to not overlap next line
-        secs = max(1.0, len(text.split()) / 2.5)
-        time.sleep(secs)
+        time.sleep(max(1.0, duration))
+    return duration
 
 
 if __name__ == "__main__":
-    msg = " ".join(sys.argv[1:]) or "Hey, I'm Wonder. Nice to meet you."
+    msg = " ".join(sys.argv[1:]) or "Hey, I'm Vibey. Nice to meet you."
     print(f"[voice] speaking: {msg!r}", flush=True)
     say(msg)
     print("[voice] done", flush=True)
