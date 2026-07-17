@@ -7,7 +7,8 @@
       "runtimeArgs": [
         "browser_viewer.py"
       ],
-      "port": 8765
+      "port": 8765,
+      "autoPort": false
     },
     {
       "name": "wonder-dashboard",
@@ -15,7 +16,8 @@
       "runtimeArgs": [
         "reachy_viewer.py"
       ],
-      "port": 8770
+      "port": 8770,
+      "autoPort": false
     },
     {
       "name": "wonder-camera",
@@ -23,7 +25,8 @@
       "runtimeArgs": [
         "reachy_camera.py"
       ],
-      "port": 8771
+      "port": 8771,
+      "autoPort": false
     },
     {
       "name": "wonder-chat",
@@ -31,7 +34,8 @@
       "runtimeArgs": [
         "reachy_chat.py"
       ],
-      "port": 8772
+      "port": 8772,
+      "autoPort": false
     },
     {
       "name": "wonder-memory",
@@ -39,7 +43,8 @@
       "runtimeArgs": [
         "reachy_memory.py"
       ],
-      "port": 8773
+      "port": 8773,
+      "autoPort": false
     },
     {
       "name": "wonder-vibeverse",
@@ -47,7 +52,8 @@
       "runtimeArgs": [
         "reachy_vibeverse.py"
       ],
-      "port": 8774
+      "port": 8774,
+      "autoPort": false
     },
     {
       "name": "wonder-telegram",
@@ -55,7 +61,8 @@
       "runtimeArgs": [
         "reachy_telegram.py"
       ],
-      "port": 0
+      "port": 0,
+      "autoPort": false
     },
     {
       "name": "wonder-bridge",
@@ -63,7 +70,8 @@
       "runtimeArgs": [
         "reachy_bridge.py"
       ],
-      "port": 0
+      "port": 0,
+      "autoPort": false
     },
     {
       "name": "wonder-alarm",
@@ -71,7 +79,8 @@
       "runtimeArgs": [
         "reachy_alarm.py"
       ],
-      "port": 0
+      "port": 0,
+      "autoPort": false
     }
   ]
 }

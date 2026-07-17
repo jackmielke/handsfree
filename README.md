@@ -12,6 +12,68 @@ Built for RSI relief, and because it's fun.
 
 ---
 
+## 🤖 Vibey — the robot half of this repo
+
+What began as a gesture OS grew a body: **Vibey**, a [Reachy Mini](https://huggingface.co/docs/reachy_mini/index)
+robot with camera eyes, mic ears, antenna eyebrows, a British-robot voice
+(switchable to Australian), a face memory, three interchangeable brains, a
+Telegram number, an avatar in a 3D world, and write access to its own source
+code. This half of the repo is the Vibey stack.
+
+### Run it
+
+```bash
+./start_wonder.sh        # boots everything, health-checks each service
+./start_wonder.sh stop
+```
+
+Robot IP lives in `.env` as `REACHY_URL` (find it with `arp -a | grep reachy`).
+Secrets (`ELEVENLABS_API_KEY`, `SUPABASE_URL/KEY`, `TELEGRAM_BOT_TOKEN`) also
+live in `.env` — gitignored, never committed.
+
+### Architecture
+
+```
+                       ┌──────────────────────────────┐
+   Reachy Mini daemon  │  reachy_camera.py   :8771    │ WebRTC video → MJPEG
+   (REST, on robot) ◄──┤  reachy_viewer.py   :8770    │ dashboard (see below)
+        ▲  ▲  ▲        │  reachy_chat.py     :8772    │ ears + voice + brains
+        │  │  │        │  reachy_memory.py   :8773    │ multi-face recognition
+   moves sounds volume │  reachy_vibeverse.py:8774    │ avatar in myvibeverse.com
+                       │  reachy_telegram.py          │ @-bot ↔ everything
+                       │  reachy_bridge.py            │ handsfree gestures → body
+                       │  reachy_alarm.py             │ wake-up shows
+                       └──────────────────────────────┘
+```
+
+| File | What it does |
+|---|---|
+| `reachy_viewer.py` | The dashboard (`:8770`): live camera + face rings, perception, voice panel with mute/modes/emotes/volume, 🧠 OpenClaw thought stream, known-faces gallery with per-photo management, ⏻ sleep/wake, ⟳ reboot, 🌅 wake-up show |
+| `reachy_chat.py` | Voice loop: mic → whisper → brain → ElevenLabs → robot speaker. Three brains: **Claude** (default), **⚡ fast** (ElevenLabs Conversational AI), **🎮 Vibe** (OpenClaw agent whose workspace is this repo — it edits its own code). Re-say, think-aloud, accent switching, dance mode, echo rejection |
+| `reachy_memory.py` | Recognizes every face in frame simultaneously (multi-sample model in Supabase, auto-learning, merge-on-name), greets people, powers the gallery |
+| `reachy_voice.py` | ElevenLabs TTS → robot speaker; runtime-switchable voices |
+| `reachy_emotes.py` | Body language: happy/excited/curious/sad/smug (+ thinking & victory, authored by Vibey itself) with synthesized chirps; dance mode with a generated beat |
+| `reachy_camera.py` | Robot camera over WebRTC re-served as MJPEG; audio send chain disabled (it barge-in-killed speech) |
+| `reachy_vibeverse.py` | Vibey's avatar in Jack's live 3D lobby — wanders, greets, answers mentions, reports home |
+| `reachy_telegram.py` | Text Vibey from anywhere: chat via active brain (replies spoken in the room), `say:` intercom, `/photo` through its eyes, `/status`, `/verse` + live lobby pushes |
+| `reachy_bridge.py` | handsfree events → body: arming perks antennas, commands nod, jam beats head-bob |
+| `reachy_alarm.py` | `alarms.json`-driven wake-ups: sunrise melody, sung verse, dance |
+| `IDENTITY.md` etc. | Vibey's OpenClaw brain files — the robot maintains these itself |
+
+### Hard-won gotchas
+
+- **The chat service must be launched from a shell** (`start_wonder.sh`), not
+  an app-spawned runner — otherwise macOS denies the mic and Vibey goes deaf.
+  The dashboard's mic meter is the tell.
+- `goto_sleep` disables motors; any wake path must re-enable them first or
+  the robot stays face-down (the ⏻ button does this).
+- The SDK's WebRTC client streams silent audio that the daemon treats as
+  barge-in, cutting speech off mid-sentence — `reachy_camera.py` patches the
+  audio send chain out. Re-check after SDK upgrades.
+- The robot's IP changes per network; only `.env` needs updating.
+
+---
+
 ## 🚀 Quickstart
 
 ```bash
