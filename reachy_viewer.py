@@ -293,6 +293,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
 </style></head><body>
 <div class=hdr style="display:flex;align-items:center;gap:14px">
   <h1 style="flex:1">🤖 Vibey — what the robot sees</h1>
+  <button id=alarmbtn class=power title="Wake-up show: sunrise song + singing + dance" style="color:var(--accent)">🌅</button>
   <button id=rebootbtn class=power title="Reboot the robot (fixes stuck motors/sounds/camera, ~30s)" style="color:var(--warn)">⟳</button>
   <button id=powerbtn class=power title="Put Vibey to sleep / wake it up">⏻</button>
 </div>
@@ -781,6 +782,13 @@ async function fetchGallery(){
   }catch(_){}
 }
 
+// ---- wake-up show ----
+$('alarmbtn').onclick=async()=>{
+  $('alarmbtn').disabled=true;$('alarmbtn').style.opacity=.4;
+  try{await fetch('/alarmnow',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(_){}
+  setTimeout(()=>{$('alarmbtn').disabled=false;$('alarmbtn').style.opacity=1;},45000);
+};
+
 // ---- reboot ----
 $('rebootbtn').onclick=async()=>{
   if(!confirm('Reboot the robot? Takes ~30 seconds; it will wake up when done.'))return;
@@ -965,6 +973,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        if self.path.startswith("/alarmnow"):
+            def _show():
+                try:
+                    from reachy_alarm import fire
+                    fire({"label": "on-demand wake-up show", "song": True})
+                except Exception as e:
+                    print(f"[viewer] alarm show failed: {e}", flush=True)
+            threading.Thread(target=_show, daemon=True).start()
+            self._send(json.dumps({"ok": True}).encode(), "application/json")
             return
         if self.path.startswith("/reboot"):
             threading.Thread(target=_reboot_robot, daemon=True).start()
