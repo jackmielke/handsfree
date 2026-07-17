@@ -92,6 +92,22 @@ def _send_photo(chat_id: int, jpeg: bytes, caption: str) -> None:
     urllib.request.urlopen(req, timeout=30).read()
 
 
+def _send_video(chat_id: int, mp4: bytes, caption: str) -> None:
+    boundary = f"----tg{uuid.uuid4().hex}"
+    parts = []
+    for k, v in (("chat_id", str(chat_id)), ("caption", caption)):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f'name="{k}"\r\n\r\n{v}\r\n'.encode())
+    parts.append((f"--{boundary}\r\nContent-Disposition: form-data; "
+                  f'name="video"; filename="vibey.mp4"\r\n'
+                  f"Content-Type: video/mp4\r\n\r\n").encode())
+    body = b"".join(parts) + mp4 + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"{API}/sendVideo", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    urllib.request.urlopen(req, timeout=60).read()
+
+
 def _post_json(url: str, body: dict, timeout: float = 300.0):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"},
@@ -117,6 +133,7 @@ def _handle(chat_id: int, text: str) -> None:
               "Just text me and I'll answer (and say it out loud in the room).\n"
               "say: <text> — I'll speak it verbatim\n"
               "/photo — see through my eyes right now\n"
+              "/clip — an 8-second video through my eyes\n"
               "/status — stack health\n"
               "/verse — what's happening in my VibeVerse lobby")
         return
@@ -127,6 +144,21 @@ def _handle(chat_id: int, text: str) -> None:
             _send_photo(chat_id, jpeg, "what I'm seeing right now 👁️")
         except Exception as e:  # noqa: BLE001
             _send(chat_id, f"camera's not answering ({e})")
+        return
+    if low.startswith("/clip"):
+        _send(chat_id, "🎬 recording 8 seconds…")
+        try:
+            out = _post_json("http://localhost:8770/capture",
+                             {"type": "video", "seconds": 8}, timeout=90)
+            name = (out or {}).get("name")
+            if not name:
+                raise RuntimeError("capture failed")
+            with urllib.request.urlopen(
+                    f"http://localhost:8770/captures/{name}", timeout=30) as r:
+                mp4 = r.read()
+            _send_video(chat_id, mp4, "8 seconds through my eyes 🎥")
+        except Exception as e:  # noqa: BLE001
+            _send(chat_id, f"clip failed ({e})")
         return
     if low == "/status":
         lines = []

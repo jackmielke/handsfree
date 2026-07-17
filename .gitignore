@@ -9,3 +9,4 @@ hand_landmarker.task
 *.log
 .openclaw/
 .telegram_state.json
+captures/

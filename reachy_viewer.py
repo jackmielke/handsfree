@@ -28,6 +28,7 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -106,6 +107,62 @@ def _reboot_robot() -> None:
     _post(f"{CHAT_URL}/mute", {"muted": False})
     _post(f"{MEM_URL}/pause", {"paused": False})
     print("[viewer] robot reboot sequence finished", flush=True)
+
+
+CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
+os.makedirs(CAPTURES_DIR, exist_ok=True)
+CAPTURING = {"video": False}
+
+
+def _capture_photo() -> str | None:
+    try:
+        with urllib.request.urlopen(f"{CAM_URL}/frame.jpg", timeout=8) as r:
+            jpeg = r.read()
+        name = time.strftime("photo_%Y%m%d_%H%M%S.jpg")
+        with open(os.path.join(CAPTURES_DIR, name), "wb") as f:
+            f.write(jpeg)
+        return name
+    except Exception as e:
+        print(f"[capture] photo failed: {e}", flush=True)
+        return None
+
+
+def _capture_video(seconds: float = 10.0, fps: int = 8) -> str | None:
+    """Pull frames from the camera bridge and assemble an mp4 with ffmpeg."""
+    if CAPTURING["video"]:
+        return None
+    CAPTURING["video"] = True
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            n = int(seconds * fps)
+            interval = 1.0 / fps
+            for i in range(n):
+                t0 = time.time()
+                try:
+                    with urllib.request.urlopen(f"{CAM_URL}/frame.jpg", timeout=5) as r:
+                        with open(os.path.join(tmp, f"{i:05d}.jpg"), "wb") as f:
+                            f.write(r.read())
+                except Exception:
+                    pass
+                time.sleep(max(0, interval - (time.time() - t0)))
+            name = time.strftime("clip_%Y%m%d_%H%M%S.mp4")
+            out = os.path.join(CAPTURES_DIR, name)
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-framerate", str(fps),
+                 "-pattern_type", "glob", "-i", os.path.join(tmp, "*.jpg"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                 out], capture_output=True, timeout=120)
+            if r.returncode != 0:
+                print(f"[capture] ffmpeg: {r.stderr.decode()[-200:]}", flush=True)
+                return None
+            return name
+    except Exception as e:
+        print(f"[capture] video failed: {e}", flush=True)
+        return None
+    finally:
+        CAPTURING["video"] = False
 
 
 def gather() -> dict:
@@ -290,6 +347,16 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   .pm-del:hover{background:#5a1a25}
   .pm-del:disabled{opacity:.3;cursor:not-allowed}
   .pm-cell .when{font-size:10px;color:var(--dim);margin-top:3px;text-align:center}
+  .cap-btn{background:#0a0b10;border:1px solid var(--line);border-radius:10px;height:36px;
+           padding:0 16px;color:var(--txt);font:inherit;font-size:13px;cursor:pointer}
+  .cap-btn:hover{border-color:var(--accent)}
+  .cap-btn:disabled{opacity:.4}
+  .capgrid{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .capgrid a{display:block;position:relative}
+  .capgrid img,.capgrid video{width:120px;height:68px;object-fit:cover;border-radius:8px;
+             border:1px solid var(--line);display:block;background:#05060a}
+  .capgrid .cap-tag{position:absolute;bottom:4px;right:4px;font-size:9px;background:rgba(0,0,0,.7);
+             padding:1px 5px;border-radius:4px;color:var(--dim)}
 </style></head><body>
 <div class=hdr style="display:flex;align-items:center;gap:14px">
   <h1 style="flex:1">🤖 Vibey — what the robot sees</h1>
@@ -309,6 +376,15 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
         <code>source reachy_env/bin/activate &amp;&amp; python3 reachy_camera.py</code></small>
       </div>
     </div>
+  </div>
+  <div class="panel full">
+    <h2>📸 Capture <span class=sub style="display:inline;margin-left:6px">saved to captures/</span></h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id=snapbtn class=cap-btn>📷 Photo</button>
+      <button id=clipbtn class=cap-btn>🎬 10s clip</button>
+      <span id=capstatus class=sub style="margin:0"></span>
+    </div>
+    <div id=capgrid class=capgrid></div>
   </div>
   <div class=panel>
     <h2>Perception</h2>
@@ -782,6 +858,51 @@ async function fetchGallery(){
   }catch(_){}
 }
 
+// ---- capture panel ----
+async function refreshCaptures(){
+  try{
+    const files=await(await fetch('/captures')).json();
+    const g=$('capgrid'); g.innerHTML='';
+    for(const f of files.slice(0,12)){
+      const a=document.createElement('a');
+      a.href='/captures/'+f.name; a.target='_blank';
+      if(f.name.endsWith('.mp4')){
+        const v=document.createElement('video'); v.src='/captures/'+f.name; v.muted=true;
+        v.onmouseover=()=>v.play(); v.onmouseout=()=>v.pause();
+        a.appendChild(v);
+      }else{
+        const im=document.createElement('img'); im.src='/captures/'+f.name;
+        a.appendChild(im);
+      }
+      const tag=document.createElement('span');
+      tag.className='cap-tag'; tag.textContent=f.name.endsWith('.mp4')?'clip':'photo';
+      a.appendChild(tag);
+      g.appendChild(a);
+    }
+  }catch(_){}
+}
+$('snapbtn').onclick=async()=>{
+  $('capstatus').textContent='snapping…';
+  try{
+    const r=await(await fetch('/capture',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'photo'})})).json();
+    $('capstatus').textContent=r.ok?'saved '+r.name:'failed';
+  }catch(e){$('capstatus').textContent='error';}
+  refreshCaptures();
+};
+$('clipbtn').onclick=async()=>{
+  $('clipbtn').disabled=true;
+  $('capstatus').textContent='recording 10s…';
+  try{
+    const r=await(await fetch('/capture',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'video',seconds:10})})).json();
+    $('capstatus').textContent=r.ok?'saved '+r.name:'failed';
+  }catch(e){$('capstatus').textContent='error';}
+  $('clipbtn').disabled=false;
+  refreshCaptures();
+};
+setInterval(refreshCaptures,30000);refreshCaptures();
+
 // ---- wake-up show ----
 $('alarmbtn').onclick=async()=>{
   $('alarmbtn').disabled=true;$('alarmbtn').style.opacity=.4;
@@ -943,6 +1064,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(
                 _get(f"{CHAT_URL}/vibelog", timeout=6.0) or {"events": []}
             ).encode(), "application/json")
+        elif self.path == "/captures":
+            files = sorted(os.listdir(CAPTURES_DIR), reverse=True)[:60]
+            out = [{"name": f,
+                    "size": os.path.getsize(os.path.join(CAPTURES_DIR, f))}
+                   for f in files if not f.startswith(".")]
+            self._send(json.dumps(out).encode(), "application/json")
+        elif self.path.startswith("/captures/"):
+            name = os.path.basename(urllib.parse.unquote(self.path.split("/captures/", 1)[1]))
+            path = os.path.join(CAPTURES_DIR, name)
+            if not os.path.isfile(path):
+                self.send_response(404); self.end_headers(); return
+            ctype = "video/mp4" if name.endswith(".mp4") else "image/jpeg"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(os.path.getsize(path)))
+            self.end_headers()
+            with open(path, "rb") as f:
+                self.wfile.write(f.read())
         elif self.path.startswith("/personsamples"):
             qs = self.path.split("?", 1)[-1] if "?" in self.path else ""
             self._send(json.dumps(
@@ -972,6 +1111,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(400)
                 self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        if self.path.startswith("/capture"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n)) if n else {}
+                if body.get("type") == "video":
+                    secs = min(30, max(2, float(body.get("seconds", 10))))
+                    name = _capture_video(secs)
+                else:
+                    name = _capture_photo()
+                self._send(json.dumps({"ok": bool(name), "name": name}).encode(),
+                           "application/json")
+            except Exception as e:
+                self.send_response(400); self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
         if self.path.startswith("/alarmnow"):

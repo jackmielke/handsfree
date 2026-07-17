@@ -26,3 +26,12 @@ Newest entries at the bottom. Read with coffee. ☕
   table, quickstart, and the hard-won gotchas (mic permissions, motor
   re-enable, WebRTC barge-in).
 - Started this changelog.
+
+## Bonus session (~22:40)
+- 📸 Capture system: dashboard panel with "📷 Photo" and "🎬 10s clip"
+  buttons, a hover-to-preview gallery of everything captured, files served
+  from captures/ (gitignored). Video = camera frames assembled to mp4 with
+  ffmpeg.
+- 📱 Telegram grew /clip — records 8 seconds through Vibey's eyes and sends
+  the video to your phone.
+- Tested both live: photo + mp4 captured and playable.
