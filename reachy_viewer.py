@@ -165,6 +165,41 @@ def _capture_video(seconds: float = 10.0, fps: int = 8) -> str | None:
         CAPTURING["video"] = False
 
 
+# Timelapse: one frame a minute into captures/timelapse_<date>/, assembled
+# to mp4 on demand (POST /timelapse {"assemble": true}). Runs continuously —
+# cheap (60 JPEGs/hour) and it means mornings come with a film of the night.
+def _timelapse_loop():
+    while True:
+        try:
+            day_dir = os.path.join(CAPTURES_DIR,
+                                   time.strftime("timelapse_%Y%m%d"))
+            os.makedirs(day_dir, exist_ok=True)
+            with urllib.request.urlopen(f"{CAM_URL}/frame.jpg", timeout=8) as r:
+                jpeg = r.read()
+            with open(os.path.join(
+                    day_dir, time.strftime("%H%M%S") + ".jpg"), "wb") as f:
+                f.write(jpeg)
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+def _timelapse_assemble(day: str | None = None) -> str | None:
+    import subprocess
+    day = day or time.strftime("%Y%m%d")
+    day_dir = os.path.join(CAPTURES_DIR, f"timelapse_{day}")
+    if not os.path.isdir(day_dir) or len(os.listdir(day_dir)) < 5:
+        return None
+    name = f"timelapse_{day}.mp4"
+    out = os.path.join(CAPTURES_DIR, name)
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-framerate", "12", "-pattern_type", "glob",
+         "-i", os.path.join(day_dir, "*.jpg"),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+         out], capture_output=True, timeout=300)
+    return name if r.returncode == 0 else None
+
+
 def gather() -> dict:
     """One consolidated perception snapshot for the browser to render."""
     face = _get(f"{REACHY_URL}/api/media/tracking/face")
@@ -1219,6 +1254,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
+        if self.path.startswith("/timelapse"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n)) if n else {}
+                name = _timelapse_assemble(body.get("day"))
+                self._send(json.dumps({"ok": bool(name), "name": name}).encode(),
+                           "application/json")
+            except Exception as e:
+                self.send_response(400); self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
         if self.path.startswith("/capture"):
             try:
                 n = int(self.headers.get("Content-Length", 0))
@@ -1319,6 +1365,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    threading.Thread(target=_timelapse_loop, daemon=True).start()
     # Make sure face tracking is on so the view has data to show.
     _post(f"{REACHY_URL}/api/media/tracking/enable")
     _post(f"{REACHY_URL}/api/media/wobbling/enable")

@@ -114,3 +114,9 @@ Newest entries at the bottom. Read with coffee. ☕
 - 🧹 Identity cleanup: purged stale "Wonder" references across all services —
   including a real bug where the CLI brain prompt still said "Reply as
   Wonder" while the persona said Vibey.
+
+## Session 9 (~02:40)
+- 🎞️ Timelapse mode: one frame a minute through Vibey's eyes into
+  captures/timelapse_<date>/, assembled to mp4 on demand. Started capturing
+  IMMEDIATELY — by morning there'll be a film of the whole night, ready to
+  assemble with the morning report.
