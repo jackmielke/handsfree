@@ -424,23 +424,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     </div>
   </div>
   <div class="panel full">
-    <h2>📸 Capture <span class=sub style="display:inline;margin-left:6px">saved to captures/</span></h2>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button id=snapbtn class=cap-btn>📷 Photo</button>
-      <button id=clipbtn class=cap-btn>🎬 10s clip</button>
-      <span id=capstatus class=sub style="margin:0"></span>
-    </div>
-    <div id=capgrid class=capgrid></div>
-  </div>
-  <div class=panel>
-    <h2>Perception</h2>
-    <div class=kv><span>Face detected</span><b id=facedet>—</b></div>
-    <div class=kv><span>People in view</span><b id=personcount>—</b></div>
-    <div id=peoplerows class=peoplerows></div>
-    <div class=kv><span>Hearing sound at</span><b class=mono id=doa>—</b></div>
-    <div class=kv><span>Speech now</span><b id=speech>—</b></div>
-  </div>
-  <div class="panel full">
     <h2>Voice · talk with Vibey</h2>
     <div class=vc-controls>
       <div class=vc-row>
@@ -475,6 +458,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
                padding:10px 18px;font:inherit;font-weight:700;cursor:pointer">Send</button>
     </div>
     <div id=saystatus class=sub style="margin:8px 0 0"></div>
+  </div>
+  <div class="panel full">
+    <h2>📸 Capture <span class=sub style="display:inline;margin-left:6px">saved to captures/</span></h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id=snapbtn class=cap-btn>📷 Photo</button>
+      <button id=clipbtn class=cap-btn>🎬 10s clip</button>
+      <span id=capstatus class=sub style="margin:0"></span>
+    </div>
+    <div id=capgrid class=capgrid></div>
+  </div>
+  <div class=panel>
+    <h2>Perception</h2>
+    <div class=kv><span>Face detected</span><b id=facedet>—</b></div>
+    <div class=kv><span>People in view</span><b id=personcount>—</b></div>
+    <div id=peoplerows class=peoplerows></div>
+    <div class=kv><span>Hearing sound at</span><b class=mono id=doa>—</b></div>
+    <div class=kv><span>Speech now</span><b id=speech>—</b></div>
   </div>
   <div class="panel full">
     <h2>Sound effects <span id=sfxstatus class=sub style="display:inline;margin-left:6px"></span></h2>
