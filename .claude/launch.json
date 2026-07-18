@@ -81,6 +81,15 @@
       ],
       "port": 0,
       "autoPort": false
+    },
+    {
+      "name": "wonder-robotmic",
+      "runtimeExecutable": "reachy_env/bin/python3",
+      "runtimeArgs": [
+        "reachy_robot_mic.py"
+      ],
+      "port": 8775,
+      "autoPort": false
     }
   ]
 }

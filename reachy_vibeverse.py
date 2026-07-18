@@ -178,6 +178,7 @@ def run():
     greeted: set[str] = set()
     replied_to: set[str] = set()
     last_heartbeat = 0.0
+    last_ambient = time.time()
     said_hello_aloud = False
 
     while True:
@@ -243,6 +244,15 @@ def run():
                 _log("say", line)
                 _speak(f"I just met {name} in the lobby and waved hello.")
             continue
+
+        # Ambient narration: every ~10 min, unprompted, tell Jack what's
+        # going on in the lobby (only if there's actually something to say —
+        # never narrate an empty room, that's just noise).
+        if time.time() - last_ambient > 600 and others:
+            last_ambient = time.time()
+            who = ", ".join(a.get("name") or "someone" for a in others)
+            _speak(f"Quick VibeVerse update: I'm still here on Edge Island, "
+                   f"hanging out with {who}.")
 
         # idle: heartbeat (and the occasional wander)
         if time.time() - last_heartbeat > 25:

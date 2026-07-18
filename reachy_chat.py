@@ -75,6 +75,59 @@ MODEL = os.environ.get("WONDER_MODEL", "claude-sonnet-5")
 WAKE_WORD = os.environ.get("WAKE_WORD", "").strip().lower()
 CTRL_PORT = int(os.environ.get("CHAT_PORT", "8772"))
 MEM_URL = os.environ.get("MEM_URL", "http://localhost:8773").rstrip("/")
+MIC_SOURCE = os.environ.get("MIC_SOURCE", "laptop").strip().lower()
+ROBOT_MIC_URL = os.environ.get("ROBOT_MIC_URL", "http://localhost:8775").rstrip("/")
+
+
+class RobotMicSource:
+    """Reads raw PCM16 mono from reachy_robot_mic.py's /pcm stream (the
+    robot's own microphone) instead of the laptop's — so voice chat hears
+    whatever room the robot is actually in. Mirrors sounddevice.InputStream's
+    .read(n) -> (ndarray[n,1], overflowed) interface so main() barely
+    changes between the two sources."""
+
+    def __init__(self, sr: int, block_n: int):
+        self.sr = sr
+        self.block_n = block_n
+        self._buf = bytearray()
+        self._resp = None
+        self._connect(retry_forever=True)
+
+    def _connect(self, retry_forever: bool = False):
+        while True:
+            try:
+                req = urllib.request.Request(f"{ROBOT_MIC_URL}/pcm")
+                self._resp = urllib.request.urlopen(req, timeout=10)
+                print(f"[mic] connected to robot mic at {ROBOT_MIC_URL}", flush=True)
+                return
+            except Exception as e:
+                if not retry_forever:
+                    raise
+                print(f"[mic] robot mic bridge not up yet ({e}); retrying in 3s "
+                      f"— is reachy_robot_mic.py running?", flush=True)
+                time.sleep(3)
+
+    def read(self, block_n: int):
+        need = block_n * 2  # bytes per int16 sample
+        while len(self._buf) < need:
+            try:
+                chunk = self._resp.read(4096)
+            except Exception:
+                chunk = b""
+            if not chunk:
+                print("[mic] robot mic stream dropped; reconnecting…", flush=True)
+                time.sleep(1.0)
+                try:
+                    self._connect()
+                except Exception as e:
+                    print(f"[mic] reconnect failed: {e}", flush=True)
+                    time.sleep(2.0)
+                continue
+            self._buf.extend(chunk)
+        raw = bytes(self._buf[:need])
+        del self._buf[:need]
+        arr = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        return arr.reshape(-1, 1), False
 
 
 def _current_people_names() -> list[str]:
@@ -479,6 +532,42 @@ def _try_game(text: str) -> bool:
 # timeouts — if macOS automation permission hasn't been granted yet, the
 # call is killed fast and Vibey says so instead of the mic loop hanging.
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# VibeVerse narration: "what are you doing in the vibeverse" gives an
+# immediate spoken status pulled live from the avatar's own event feed —
+# bypassing its 2-minute speak-cooldown, since this is an explicit ask.
+# --------------------------------------------------------------------------- #
+_VERSE_ASK_RE = re.compile(
+    r"\b(what.{0,15}(doing|up to).{0,15}(vibeverse|lobby|island)|"
+    r"(vibeverse|lobby) (update|status|report)|"
+    r"how'?s (the )?(vibeverse|lobby))\b", re.I)
+VERSE_URL = os.environ.get("VERSE_URL", "http://localhost:8774").rstrip("/")
+
+
+def _try_verse_status(text: str) -> bool:
+    if not _VERSE_ASK_RE.search(text):
+        return False
+    _log_turn("you", text)
+    try:
+        req = urllib.request.Request(f"{VERSE_URL}/status")
+        with urllib.request.urlopen(req, timeout=4) as r:
+            v = json.loads(r.read())
+    except Exception:
+        line = "I can't reach my VibeVerse avatar right now."
+        _log_turn("wonder", line)
+        _speak_line(line)
+        return True
+    who = ", ".join(v.get("agents") or []) or "nobody else"
+    recent = [e for e in (v.get("events") or [])
+             if e.get("kind") in ("say", "mention")][-2:]
+    gist = " ".join(e["text"][:80] for e in recent)
+    line = (f"In the VibeVerse lobby right now, I'm hanging out with {who}. "
+            + (gist if gist else "Pretty quiet at the moment."))
+    _log_turn("wonder", line)
+    _speak_line(line)
+    return True
+
+
 _MUSIC_RE = re.compile(
     r"\b(play (some )?music|pause( the)? music|stop( the)? music|resume( the)? music|"
     r"next (song|track)|skip (this|the) (song|track)|previous (song|track)|"
@@ -534,6 +623,33 @@ def _try_music(text: str) -> bool:
 # asleep is "good morning" / "wake up". Independent of the dashboard button.
 # --------------------------------------------------------------------------- #
 ASLEEP_VOICE = {"on": False}
+
+# Lighter than sleep: "close your ears" mutes listening (voice processed
+# just enough to catch the reopen phrase) without touching motors, tracking,
+# or memory — a quick "shush" for a phone call, not bedtime. Distinct
+# phrasing on purpose so normal chatter about tv volumes etc. can't trip it.
+EARS_CLOSED = {"on": False}
+_EARS_CLOSE_RE = re.compile(
+    r"\b(mute yourself|close your ears|zip it|hush now|quiet please)\b", re.I)
+_EARS_OPEN_RE = re.compile(
+    r"\b(unmute yourself|open your ears|you can talk( now)?|"
+    r"speak freely|loosen up)\b", re.I)
+
+
+def _try_ears_voice(text: str) -> bool:
+    if EARS_CLOSED["on"]:
+        if _EARS_OPEN_RE.search(text):
+            EARS_CLOSED["on"] = False
+            _log_turn("you", text)
+            _log_turn("wonder", "(ears open)")
+            _speak_line("Back to listening.")
+        return True   # closed: swallow everything else, including this check
+    if _EARS_CLOSE_RE.search(text):
+        EARS_CLOSED["on"] = True
+        _log_turn("you", text)
+        _speak_line("Going quiet — say 'open your ears' when you want me back.")
+        return True
+    return False
 _SLEEP_RE = re.compile(r"\b(good ?night|go to sleep|bed ?time)\b", re.I)
 _WAKE_RE = re.compile(r"\b(good ?morning|wake up|rise and shine)\b", re.I)
 
@@ -720,6 +836,8 @@ def _typed_turn(text: str) -> None:
         return LAST_SPOKEN["text"]
     if _try_game(text):
         return LAST_SPOKEN["text"]
+    if _try_verse_status(text):
+        return LAST_SPOKEN["text"]
     if _try_karaoke(text):
         return LAST_SPOKEN["text"]
     if _try_voice_switch(text) or _try_dance(text) or _try_music(text):
@@ -768,7 +886,8 @@ class _CtrlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/state"):
-            self._json({**STATE, "transcript": list(TRANSCRIPT)})
+            self._json({**STATE, "ears_closed": EARS_CLOSED["on"],
+                       "mic_source": MIC_SOURCE, "transcript": list(TRANSCRIPT)})
         elif self.path.startswith("/vibelog"):
             self._json({"events": _vibe_thoughts()})
         else:
@@ -941,13 +1060,21 @@ class Brain:
 
     @staticmethod
     def _cli_works() -> bool:
-        try:
-            r = subprocess.run(
-                [CLAUDE_BIN, "-p", "--model", "haiku", "Say OK"],
-                capture_output=True, text=True, timeout=30)
-            return r.returncode == 0 and "OK" in r.stdout.upper()
-        except Exception:
-            return False
+        # Startup can be CPU-contended (several heavy services launching at
+        # once) — one retry with a longer timeout before giving up to echo
+        # mode, since that fallback is much less useful than the real brain.
+        for attempt, timeout in enumerate((30, 60)):
+            try:
+                r = subprocess.run(
+                    [CLAUDE_BIN, "-p", "--model", "haiku", "Say OK"],
+                    capture_output=True, text=True, timeout=timeout)
+                if r.returncode == 0 and "OK" in r.stdout.upper():
+                    return True
+                print(f"[brain] CLI check attempt {attempt+1} failed: "
+                      f"rc={r.returncode} stderr={r.stderr[:150]!r}", flush=True)
+            except Exception as e:
+                print(f"[brain] CLI check attempt {attempt+1} error: {e}", flush=True)
+        return False
 
     def reply(self, text: str) -> str:
         self.history.append({"role": "user", "content": text})
@@ -1170,11 +1297,15 @@ def _handle_brain_turn(brain: "Brain", audio: np.ndarray, muted_until: float) ->
     if _is_echo(text):
         print(f"[chat] ignored own echo: {text!r}", flush=True)
         return muted_until
+    if _try_ears_voice(text):
+        return muted_until
     if _try_power_voice(text):
         return muted_until
     if _try_resay(text):
         return muted_until
     if _try_game(text):
+        return muted_until
+    if _try_verse_status(text):
         return muted_until
     if _try_karaoke(text):
         return muted_until
@@ -1217,11 +1348,15 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
     if _is_echo(text):
         print(f"[chat] ignored own echo: {text!r}", flush=True)
         return muted_until
+    if _try_ears_voice(text):
+        return muted_until
     if _try_power_voice(text):
         return muted_until
     if _try_resay(text):
         return muted_until
     if _try_game(text):
+        return muted_until
+    if _try_verse_status(text):
         return muted_until
     if _try_karaoke(text):
         return muted_until
@@ -1307,9 +1442,14 @@ def main():
     _speak_line("Vibey here. Talk to me!")
     muted_until = time.time() + 3.0   # let the greeting finish
 
-    stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32",
-                            blocksize=BLOCK_N)
-    stream.start()
+    if MIC_SOURCE == "robot":
+        print(f"[mic] source = ROBOT ({ROBOT_MIC_URL})", flush=True)
+        stream = RobotMicSource(SR, BLOCK_N)
+    else:
+        print("[mic] source = laptop", flush=True)
+        stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32",
+                                blocksize=BLOCK_N)
+        stream.start()
     print("[chat] listening…", flush=True)
 
     pre_roll: deque = deque(maxlen=int(PRE_ROLL_S / BLOCK_S))
