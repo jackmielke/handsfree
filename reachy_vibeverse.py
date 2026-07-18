@@ -34,6 +34,27 @@ from reachy_voice import load_env, say
 
 load_env()
 
+def _resolve_claude_bin() -> str:
+    """Absolute path to the claude CLI. Bare "claude" only works if PATH
+    happens to include it at process-start time — flaky depending on how
+    the service was launched (shell vs. app-spawned). Resolve once, with a
+    couple of common install locations as fallback."""
+    import shutil
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in (
+        os.path.expanduser("~/.local/bin/claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return "claude"  # last resort — let it fail loudly if truly missing
+
+
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or _resolve_claude_bin()
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 ANON_KEY = os.environ.get("SUPABASE_KEY", "")
 WORLD_URL = f"{SUPABASE_URL}/functions/v1/vibe-world"
@@ -94,7 +115,7 @@ def _short_reply(context: str) -> str:
     Falls back to a canned line if the CLI is unavailable."""
     try:
         r = subprocess.run(
-            ["claude", "-p", "--model", "haiku",
+            [CLAUDE_BIN, "-p", "--model", "haiku",
              f"You are Vibey, a cheeky little robot avatar in a 3D lobby. "
              f"Reply to this in ONE short line under 70 characters, casual, "
              f"in character, no quotes, no emoji: {context}"],

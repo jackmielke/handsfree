@@ -50,6 +50,27 @@ from reachy_voice import load_env, say, upload_sound, play_sound
 
 load_env()
 
+def _resolve_claude_bin() -> str:
+    """Absolute path to the claude CLI. Bare "claude" only works if PATH
+    happens to include it at process-start time — flaky depending on how
+    the service was launched (shell vs. app-spawned). Resolve once, with a
+    couple of common install locations as fallback."""
+    import shutil
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in (
+        os.path.expanduser("~/.local/bin/claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return "claude"  # last resort — let it fail loudly if truly missing
+
+
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or _resolve_claude_bin()
+
 MODEL = os.environ.get("WONDER_MODEL", "claude-sonnet-5")
 WAKE_WORD = os.environ.get("WAKE_WORD", "").strip().lower()
 CTRL_PORT = int(os.environ.get("CHAT_PORT", "8772"))
@@ -282,7 +303,7 @@ _GAME_STOP_RE = re.compile(r"\b(stop|end|quit) the game\b|\bgame over\b", re.I)
 
 
 def _haiku(prompt: str, timeout: int = 30) -> str:
-    r = subprocess.run(["claude", "-p", "--model", "haiku", prompt],
+    r = subprocess.run([CLAUDE_BIN, "-p", "--model", "haiku", prompt],
                        capture_output=True, text=True, timeout=timeout)
     return (r.stdout or "").strip()
 
@@ -706,7 +727,11 @@ def _typed_turn(text: str) -> None:
     _log_turn("you", text)
     try:
         if STATE["vibe"] and STATE["vibe_available"]:
-            reply = _vibe_reply(text)
+            try:
+                reply = _vibe_reply(text)
+            except Exception as e:
+                print(f"[msg] vibe failed, CLI fallback: {e}", flush=True)
+                reply = BRAIN.reply(text) if BRAIN else "Agent brain offline."
         elif BRAIN is not None:
             reply = BRAIN.reply(text)
         else:
@@ -918,7 +943,7 @@ class Brain:
     def _cli_works() -> bool:
         try:
             r = subprocess.run(
-                ["claude", "-p", "--model", "haiku", "Say OK"],
+                [CLAUDE_BIN, "-p", "--model", "haiku", "Say OK"],
                 capture_output=True, text=True, timeout=30)
             return r.returncode == 0 and "OK" in r.stdout.upper()
         except Exception:
@@ -977,7 +1002,7 @@ class Brain:
             for m in self.history)
         prompt = (f"{self._persona()}\n\nConversation so far:\n{convo}\n\n"
                   f"Reply as Vibey with ONLY the spoken sentence(s), nothing else.")
-        r = subprocess.run(["claude", "-p", "--model", MODEL, prompt],
+        r = subprocess.run([CLAUDE_BIN, "-p", "--model", MODEL, prompt],
                            capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip()[:200])
@@ -1210,7 +1235,13 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         reply = _vibe_reply(text)
     except Exception as e:
         print(f"[vibe] error: {e}", flush=True)
-        reply = "Hmm, my vibe brain hit a snag. Say that again?"
+        # Degrade to the regular Claude brain instead of apologizing —
+        # (common cause: the OpenClaw gateway's API key is out of credits).
+        if BRAIN is not None:
+            print("[vibe] falling back to CLI brain", flush=True)
+            reply = BRAIN.reply(text)
+        else:
+            reply = "My agent brain is offline and I have no backup. Help!"
     print(f"[vibe] reply ({time.time()-t1:.1f}s): {reply!r}", flush=True)
     if not reply:
         return muted_until
