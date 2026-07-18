@@ -296,6 +296,17 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   .vc-vol{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11px;
           text-transform:uppercase;letter-spacing:.8px}
   .vc-vol input{width:120px;accent-color:var(--accent)}
+  .sfxbar{display:grid;grid-template-columns:repeat(auto-fill,minmax(116px,1fr));gap:8px}
+  .sfx-btn{height:42px;background:#0a0b10;border:1px solid var(--line);border-radius:10px;
+           color:var(--txt);font:inherit;font-size:12px;cursor:pointer;padding:0 10px;
+           display:flex;align-items:center;justify-content:space-between;gap:8px;
+           transition:border-color .12s,background .12s,transform .12s}
+  .sfx-btn:hover{border-color:var(--accent);background:#101521}
+  .sfx-btn:active{transform:translateY(1px)}
+  .sfx-btn.playing{border-color:#1e3a2f;background:#102018;color:var(--good)}
+  .sfx-icon{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--accent);
+            border:1px solid #14324a;border-radius:999px;padding:2px 6px;white-space:nowrap}
+  .sfx-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .convo{max-height:260px;min-height:80px;overflow-y:auto;display:flex;flex-direction:column;
          gap:8px;padding:4px 2px;scroll-behavior:smooth}
   .convo-empty{color:#3a3f52;font-size:13px;text-align:center;padding:24px 0}
@@ -464,6 +475,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
                padding:10px 18px;font:inherit;font-weight:700;cursor:pointer">Send</button>
     </div>
     <div id=saystatus class=sub style="margin:8px 0 0"></div>
+  </div>
+  <div class="panel full">
+    <h2>Sound effects <span id=sfxstatus class=sub style="display:inline;margin-left:6px"></span></h2>
+    <div id=sfxbar class=sfxbar></div>
   </div>
   <div class="panel full">
     <h2>🧠 Vibey's head <span class=sub style="display:inline;margin-left:6px">OpenClaw agent — thinking, tool calls, code edits</span></h2>
@@ -993,6 +1008,35 @@ for(const [name,icon] of Object.entries(EMOTES)){
   $('emotes').appendChild(b);
 }
 
+// ---- soundboard ----
+async function loadSfx(){
+  try{
+    const sounds=await(await fetch('/sfx')).json();
+    const box=$('sfxbar');
+    box.innerHTML='';
+    for(const s of sounds){
+      const b=document.createElement('button');
+      b.className='sfx-btn';
+      b.title=s.label;
+      b.innerHTML='<span class=sfx-label></span><span class=sfx-icon></span>';
+      b.querySelector('.sfx-label').textContent=s.label;
+      b.querySelector('.sfx-icon').textContent=s.icon||'SFX';
+      b.onclick=async()=>{
+        b.classList.add('playing');
+        $('sfxstatus').textContent=s.label;
+        try{
+          const r=await fetch('/sfx',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({name:s.name})});
+          if(!r.ok)$('sfxstatus').textContent='sound failed';
+        }catch(_){$('sfxstatus').textContent='sound failed';}
+        setTimeout(()=>b.classList.remove('playing'),450);
+      };
+      box.appendChild(b);
+    }
+  }catch(_){$('sfxstatus').textContent='soundboard offline';}
+}
+loadSfx();
+
 connectHandsfree();
 setInterval(tick,250);tick();
 setInterval(fetchGallery,5000);fetchGallery();
@@ -1164,6 +1208,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(
                 _get(f"{REACHY_URL}/api/volume/current") or {}
             ).encode(), "application/json")
+        elif self.path.startswith("/sfx"):
+            from reachy_sfx import catalog
+            self._send(json.dumps(catalog()).encode(), "application/json")
         elif self.path.startswith("/peoplelist"):
             self._send(json.dumps(
                 _get(f"{MEM_URL}/people", timeout=8.0) or []
@@ -1325,6 +1372,18 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(n))
                 from reachy_emotes import play as play_emote
                 ok = play_emote(body.get("name", ""), sound=True)
+                self._send(json.dumps({"ok": ok}).encode(), "application/json")
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        if self.path.startswith("/sfx"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n))
+                from reachy_sfx import play as play_sfx
+                ok = play_sfx(body.get("name", ""))
                 self._send(json.dumps({"ok": ok}).encode(), "application/json")
             except Exception as e:
                 self.send_response(400)

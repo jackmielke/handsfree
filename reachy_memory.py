@@ -347,6 +347,127 @@ def best_match(embedding: list[float], samples: list[dict]):
 
 
 # --------------------------------------------------------------------------- #
+# Auto-grouping: periodically compare identity clusters and merge the ones
+# that are confidently the same person, so duplicates stop piling up for
+# Jack to clean manually. Conservative by design:
+#   - merge only when the closest sample pair between two identities is
+#     within AUTO_MERGE_TOLERANCE (default 0.44 — confident-match range;
+#     same-person pairs measured 0.37-0.57, different people 0.62+)
+#   - NEVER auto-merge two identities that carry different names
+#   - unnamed folds into named; otherwise smaller folds into bigger
+# --------------------------------------------------------------------------- #
+# 0.50: measured floor between DIFFERENT people in this house is 0.538
+# (Jack<->Kai — family resemblance), so 0.50 groups true duplicates while
+# never reaching the sibling zone. The different-names guard is the second
+# safety net.
+AUTO_MERGE_TOLERANCE = float(os.environ.get("AUTO_MERGE_TOLERANCE", "0.50"))
+# Unnamed identities glimpsed once and never again are almost always
+# mis-detections or passers-by; they get pruned after a few days.
+AUTO_PRUNE_DAYS = float(os.environ.get("AUTO_PRUNE_DAYS", "3"))
+AUTO_MERGE_EVERY_S = float(os.environ.get("AUTO_MERGE_EVERY_S", "900"))
+_auto_merge = {"last": 0.0}
+
+
+def _auto_merge_pass(verbose: bool = False) -> int:
+    """One grouping sweep. Returns how many merges happened."""
+    try:
+        import numpy as np
+    except ImportError:
+        return 0
+    try:
+        samples = sb_get_samples()
+    except Exception as e:
+        print(f"[memory] auto-merge read failed: {e}", flush=True)
+        return 0
+
+    clusters: dict[str, dict] = {}
+    for s in samples:
+        if not s.get("embedding"):
+            continue
+        c = clusters.setdefault(s["face_id"], {
+            "name": s.get("name"), "times_seen": s.get("times_seen", 1),
+            "embs": []})
+        c["embs"].append(np.array(s["embedding"]))
+    ids = list(clusters)
+    merges = 0
+    merged_away: set[str] = set()
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            if a in merged_away or b in merged_away:
+                continue
+            ca, cb = clusters[a], clusters[b]
+            # different explicit names → hands off, always
+            if ca["name"] and cb["name"] and ca["name"] != cb["name"]:
+                continue
+            dmin = min(float(np.linalg.norm(ea - eb))
+                       for ea in ca["embs"] for eb in cb["embs"])
+            if dmin > AUTO_MERGE_TOLERANCE:
+                continue
+            # keeper: named beats unnamed; then most-seen
+            if ca["name"] and not cb["name"]:
+                keep, drop = a, b
+            elif cb["name"] and not ca["name"]:
+                keep, drop = b, a
+            elif ca["times_seen"] >= cb["times_seen"]:
+                keep, drop = a, b
+            else:
+                keep, drop = b, a
+            try:
+                sb_merge_faces(drop, keep)
+                merged_away.add(drop)
+                clusters[keep]["embs"].extend(clusters[drop]["embs"])
+                merges += 1
+                who = clusters[keep]["name"] or keep[:8]
+                print(f"[memory] auto-merged {drop[:8]} into {who} "
+                      f"(d={dmin:.2f})", flush=True)
+            except Exception as e:
+                print(f"[memory] auto-merge failed: {e}", flush=True)
+    if verbose and merges == 0:
+        print("[memory] auto-merge: nothing close enough to group", flush=True)
+    return merges
+
+
+def _auto_prune_pass() -> int:
+    """Delete unnamed one-sighting identities not seen in AUTO_PRUNE_DAYS."""
+    try:
+        url = (f"{SUPABASE_URL}/rest/v1/faces"
+               "?select=id,name,times_seen,last_seen")
+        req = urllib.request.Request(url, headers=_sb_headers())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            faces = json.loads(r.read() or b"[]")
+    except Exception:
+        return 0
+    from datetime import datetime as _dt, timezone as _tz
+    cutoff = time.time() - AUTO_PRUNE_DAYS * 86400
+    pruned = 0
+    for f in faces:
+        if f.get("name") or f.get("times_seen", 0) > 1:
+            continue
+        try:
+            seen = _dt.fromisoformat(
+                f["last_seen"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if seen < cutoff:
+            try:
+                sb_delete_face(f["id"])
+                pruned += 1
+                print(f"[memory] pruned stale one-off {f['id'][:8]}", flush=True)
+            except Exception:
+                pass
+    return pruned
+
+
+def _maybe_auto_merge() -> None:
+    if time.time() - _auto_merge["last"] < AUTO_MERGE_EVERY_S:
+        return
+    _auto_merge["last"] = time.time()
+    _auto_merge_pass()
+    _auto_prune_pass()
+
+
+# --------------------------------------------------------------------------- #
 # Shared journal: every ~30 min with activity, the robot writes a short
 # first-person entry into vibey_journal_entries — the same diary the
 # Telegram Vibey keeps — so both Vibeys share one memory. Rows are tagged
@@ -793,6 +914,7 @@ def run():
         for p in seen_now:
             _journal_note(p.get("name"))
         _journal_flush()
+        _maybe_auto_merge()
         _maybe_glance(faces)
         _maybe_start_conversation(bool(faces))
 
@@ -809,7 +931,10 @@ def run():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "--name":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--group":
+        n = _auto_merge_pass(verbose=True)
+        print(f"merged {n} duplicate identit{'y' if n == 1 else 'ies'}")
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--name":
         sb_name_face(sys.argv[2], " ".join(sys.argv[3:]))
         print(f"named {sys.argv[2]} -> {' '.join(sys.argv[3:])}")
     else:
