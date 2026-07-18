@@ -664,6 +664,28 @@ def _robot_post(path: str, timeout: float = 20.0) -> None:
         print(f"[power] {path} failed: {e}", flush=True)
 
 
+# Antenna posture doubles as a mode indicator you can read across the room:
+#   cli (Wonder)  relaxed, slightly crossed
+#   fast ⚡       both straight up — "all ears, no thinking"
+#   vibe 🎮       one up one cocked — "hands in the code"
+# antennas-only goto leaves the head to the daemon's face tracker.
+ANTENNA_POSES = {"cli": [0.15, -0.15], "fast": [0.9, -0.9], "vibe": [0.9, 0.3]}
+
+
+def _mode_antennas() -> None:
+    mode = "vibe" if STATE["vibe"] else ("fast" if STATE["fast"] else "cli")
+    try:
+        url = os.environ.get("REACHY_URL", "http://192.168.12.240:8000").rstrip("/")
+        body = json.dumps({"antennas": ANTENNA_POSES[mode],
+                           "duration": 0.8}).encode()
+        req = urllib.request.Request(f"{url}/api/move/goto", data=body,
+                                     method="POST",
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=8).read()
+    except Exception as e:
+        print(f"[antenna] pose failed: {e}", flush=True)
+
+
 def _voice_sleep() -> None:
     ASLEEP_VOICE["on"] = True
     _log_turn("wonder", "(goodnight — say 'good morning' to wake me)")
@@ -687,6 +709,7 @@ def _voice_wake() -> None:
     _robot_post("/api/move/play/wake_up")
     _robot_post("/api/media/tracking/enable", 8)
     _robot_post("/api/media/wobbling/enable", 8)
+    _mode_antennas()
     try:
         import urllib.request as _u
         _u.urlopen(_u.Request("http://localhost:8773/pause",
@@ -910,6 +933,7 @@ class _CtrlHandler(BaseHTTPRequestHandler):
                 STATE["fast"] = fast
                 if fast:
                     STATE["vibe"] = False   # modes are mutually exclusive
+                threading.Thread(target=_mode_antennas, daemon=True).start()
                 self._json({"ok": True, "fast": STATE["fast"]})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
@@ -964,6 +988,7 @@ class _CtrlHandler(BaseHTTPRequestHandler):
                 STATE["vibe"] = vibe
                 if vibe:
                     STATE["fast"] = False   # modes are mutually exclusive
+                threading.Thread(target=_mode_antennas, daemon=True).start()
                 self._json({"ok": True, "vibe": STATE["vibe"]})
             except Exception as e:
                 self._json({"error": str(e)}, 400)
@@ -1252,8 +1277,11 @@ def transcribe(audio: np.ndarray) -> str:
     global _whisper
     if _whisper is None:
         from faster_whisper import WhisperModel
-        print("[stt] loading whisper tiny.en …", flush=True)
-        _whisper = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+        # small.en over tiny.en: noticeably better accuracy on room-mic audio;
+        # ~1-2s slower per utterance on CPU, worth it. WHISPER_MODEL overrides.
+        model = os.environ.get("WHISPER_MODEL", "small.en")
+        print(f"[stt] loading whisper {model} …", flush=True)
+        _whisper = WhisperModel(model, device="cpu", compute_type="int8")
     segments, _ = _whisper.transcribe(audio, beam_size=1, vad_filter=False)
     return " ".join(s.text.strip() for s in segments).strip()
 
@@ -1439,6 +1467,7 @@ def main():
     print(f"[vibe] openclaw {'found' if STATE['vibe_available'] else 'NOT found'} "
           f"at {OPENCLAW_BIN}", flush=True)
     STATE["mic_threshold"] = SPEECH_RMS
+    threading.Thread(target=_mode_antennas, daemon=True).start()
     _speak_line("Vibey here. Talk to me!")
     muted_until = time.time() + 3.0   # let the greeting finish
 

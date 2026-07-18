@@ -3229,7 +3229,7 @@ HTML = """<!doctype html>
       <div class="cc-label" style="color:#b48cff;">experiments</div>
       <div class="cc-opts" id="cc-exp-opts">
         <button class="cc-opt" data-exp="hands_off" title="🙅 Hands off mode: face + voice still work; hand gestures are ignored. Toggle with this tile or say 'hands off' / 'hands on'.">🙅 hands off</button>
-        <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. Say 'stillness on' or 'owl mode' to toggle.">🦉 stillness mode</button>
+        <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. THIS TILE IS THE ONLY WAY TO TURN IT ON (no voice/gesture activation — they kept firing accidentally). To exit: click again, say 'stillness off', or throw 🤘.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
         <button class="cc-opt" data-exp="two_hand_cc" title="👌👌 Both hands doing OK = Cmd+C copy · ✌️✌️ Both hands doing peace = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">👌✌️ two-hand copy/paste</button>
@@ -6462,9 +6462,9 @@ _v2_dict: dict = {
     "hands on":            "hands_on",
     "hands back":          "hands_on",
     "use hands":           "hands_on",
-    "stillness on":        "stillness_on",
-    "start stillness":     "stillness_on",
-    "owl mode":            "stillness_on",
+    # NOTE: stillness mode deliberately has NO voice commands — fuzzy
+    # matches on casual speech kept randomly activating it, which moves
+    # the user's cursor unexpectedly. Control Center tile only.
     "stillness off":       "stillness_off",
     "stop stillness":      "stillness_off",
     "mouth off":           "mouth_click_off",

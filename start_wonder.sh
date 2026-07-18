@@ -16,6 +16,9 @@ cd "$(dirname "$0")"
 set -a; source .env 2>/dev/null; set +a
 # reachy_camera.py takes a bare host, derive it from REACHY_URL
 export REACHY_HOST=$(echo "${REACHY_URL:-http://192.168.12.240:8000}" | sed -E 's|https?://([^:/]+).*|\1|')
+# A stale token in ~/.cache/huggingface/token 401s even PUBLIC model downloads
+# (whisper small.en). Anonymous access works fine.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 
 stop_all() {
   pkill -f "reachy_camera.py" 2>/dev/null
@@ -49,7 +52,9 @@ reachy_env/bin/python3 reachy_robot_mic.py > /tmp/reachy_robot_mic.log 2>&1 &
 reachy_env/bin/python3 reachy_memory.py  > /tmp/reachy_memory.log 2>&1 &
 python3                reachy_vibeverse.py > /tmp/vibeverse.log     2>&1 &
 python3                reachy_telegram.py  > /tmp/telegram.log      2>&1 &
-NO_WAKE=1 python3      reachy_bridge.py    > /tmp/reachy_bridge.log 2>&1 &
+# Gesture bridge mirrors your handsfree session onto the robot's body —
+# fun for parties, twitchy as an always-on behavior. Opt in with BRIDGE=1.
+[[ "$BRIDGE" == "1" ]] && NO_WAKE=1 python3 reachy_bridge.py > /tmp/reachy_bridge.log 2>&1 &
 python3                reachy_alarm.py     > /tmp/reachy_alarm.log  2>&1 &
 pgrep -x caffeinate >/dev/null || (caffeinate -dims > /dev/null 2>&1 &)   # alarms need an awake Mac
 
