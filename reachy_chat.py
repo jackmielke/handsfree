@@ -854,6 +854,25 @@ def _try_resay(text: str) -> bool:
 MUTED_EXT = {"until": 0.0}
 
 
+def _vibe_fallback_should_disable(err: Exception) -> bool:
+    """When vibe fails because the OpenClaw gateway is out of credits (or
+    otherwise hard-down), keep vibe mode ON and you pay ~10s of failed
+    round-trip on EVERY message before falling back. Detect that class of
+    error and auto-flip vibe OFF so the very next message goes straight to
+    the fast CLI brain — the robot heals itself instead of staying slow."""
+    msg = str(err).lower()
+    dead = any(s in msg for s in (
+        "credit balance", "credit_balance", "too low", "all models failed",
+        "insufficient", "quota", "402", "payment"))
+    if dead and STATE.get("vibe"):
+        STATE["vibe"] = False
+        print("[vibe] gateway looks out of credits — auto-disabling vibe mode "
+              "so replies stay fast (turn it back on once credits are added)",
+              flush=True)
+        threading.Thread(target=_mode_antennas, daemon=True).start()
+    return dead
+
+
 def _typed_turn(text: str) -> None:
     """A chat message typed on the dashboard — same brains as the mic path
     (vibe → openclaw agent, otherwise Claude), reply spoken on the robot."""
@@ -876,6 +895,7 @@ def _typed_turn(text: str) -> None:
                 reply = _vibe_reply(text)
             except Exception as e:
                 print(f"[msg] vibe failed, CLI fallback: {e}", flush=True)
+                _vibe_fallback_should_disable(e)
                 reply = BRAIN.reply(text) if BRAIN else "Agent brain offline."
         elif BRAIN is not None:
             reply = BRAIN.reply(text)
@@ -1410,6 +1430,7 @@ def _handle_vibe_turn(audio: np.ndarray, muted_until: float) -> float:
         print(f"[vibe] error: {e}", flush=True)
         # Degrade to the regular Claude brain instead of apologizing —
         # (common cause: the OpenClaw gateway's API key is out of credits).
+        _vibe_fallback_should_disable(e)
         if BRAIN is not None:
             print("[vibe] falling back to CLI brain", flush=True)
             reply = BRAIN.reply(text)

@@ -459,13 +459,18 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <div id=saystatus class=sub style="margin:8px 0 0"></div>
   </div>
   <div class="panel full">
-    <h2>📸 Capture <span class=sub style="display:inline;margin-left:6px">saved to captures/</span></h2>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button id=snapbtn class=cap-btn>📷 Photo</button>
-      <button id=clipbtn class=cap-btn>🎬 10s clip</button>
-      <span id=capstatus class=sub style="margin:0"></span>
+    <h2>Friends · known faces <span id=peoplecount class=sub style="display:inline;margin-left:6px"></span></h2>
+    <div id=gallery class=gallery>
+      <div class=gallery-empty>Nobody learned yet — stand in front of Vibey and teach it a name above.</div>
     </div>
-    <div id=capgrid class=capgrid></div>
+  </div>
+  <div class="panel full">
+    <h2>🧠 Vibey's head <span class=sub style="display:inline;margin-left:6px">OpenClaw agent — thinking, tool calls, code edits</span></h2>
+    <div id=brainlog class=brainlog><div class=brainlog-empty>Turn on 🎮 Vibe mode and talk to it — its thought process streams here.</div></div>
+  </div>
+  <div class="panel full">
+    <h2>Sound effects <span id=sfxstatus class=sub style="display:inline;margin-left:6px"></span></h2>
+    <div id=sfxbar class=sfxbar></div>
   </div>
   <div class=panel>
     <h2>Perception</h2>
@@ -475,13 +480,21 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <div class=kv><span>Hearing sound at</span><b class=mono id=doa>—</b></div>
     <div class=kv><span>Speech now</span><b id=speech>—</b></div>
   </div>
-  <div class="panel full">
-    <h2>Sound effects <span id=sfxstatus class=sub style="display:inline;margin-left:6px"></span></h2>
-    <div id=sfxbar class=sfxbar></div>
+  <div class=panel>
+    <h2>Body · handsfree</h2>
+    <div class=kv><span>Head pose (r/p/y)</span><b class=mono id=pose>—</b></div>
+    <div class=kv><span>Antennas</span><b class=mono id=ant>—</b></div>
+    <div class=kv><span>Voice</span><b id=voice>—</b></div>
+    <div class=kv><span>Last command</span><b id=cmd>—</b></div>
   </div>
   <div class="panel full">
-    <h2>🧠 Vibey's head <span class=sub style="display:inline;margin-left:6px">OpenClaw agent — thinking, tool calls, code edits</span></h2>
-    <div id=brainlog class=brainlog><div class=brainlog-empty>Turn on 🎮 Vibe mode and talk to it — its thought process streams here.</div></div>
+    <h2>📸 Capture <span class=sub style="display:inline;margin-left:6px">saved to captures/</span></h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id=snapbtn class=cap-btn>📷 Photo</button>
+      <button id=clipbtn class=cap-btn>🎬 10s clip</button>
+      <span id=capstatus class=sub style="margin:0"></span>
+    </div>
+    <div id=capgrid class=capgrid></div>
   </div>
   <div class=panel>
     <h2>⏰ Alarms <span class=sub style="display:inline;margin-left:6px">wake-up shows</span></h2>
@@ -502,19 +515,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <h2>🌐 VibeVerse <span class=sub style="display:inline;margin-left:6px">Vibey's avatar on Edge Island · <a href="https://myvibeverse.com/city?spawn=island" target=_blank style="color:var(--accent)">visit</a></span></h2>
     <div class=kv><span>In lobby with</span><b id=versewho>—</b></div>
     <div id=verselog class=brainlog style="max-height:170px;margin-top:10px"></div>
-  </div>
-  <div class=panel>
-    <h2>Body · handsfree</h2>
-    <div class=kv><span>Head pose (r/p/y)</span><b class=mono id=pose>—</b></div>
-    <div class=kv><span>Antennas</span><b class=mono id=ant>—</b></div>
-    <div class=kv><span>Voice</span><b id=voice>—</b></div>
-    <div class=kv><span>Last command</span><b id=cmd>—</b></div>
-  </div>
-  <div class="panel full">
-    <h2>Known faces <span id=peoplecount class=sub style="display:inline;margin-left:6px"></span></h2>
-    <div id=gallery class=gallery>
-      <div class=gallery-empty>Nobody learned yet — stand in front of Vibey and teach it a name above.</div>
-    </div>
   </div>
 </div>
 <div id=photomodal class=modal-backdrop>
