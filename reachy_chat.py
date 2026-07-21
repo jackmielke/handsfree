@@ -75,7 +75,11 @@ MODEL = os.environ.get("WONDER_MODEL", "claude-sonnet-5")
 WAKE_WORD = os.environ.get("WAKE_WORD", "").strip().lower()
 CTRL_PORT = int(os.environ.get("CHAT_PORT", "8772"))
 MEM_URL = os.environ.get("MEM_URL", "http://localhost:8773").rstrip("/")
-MIC_SOURCE = os.environ.get("MIC_SOURCE", "laptop").strip().lower()
+# Robot's own ears, always — the laptop mic hears the wrong room. Default
+# changed from "laptop" to "robot" so this is true even if .env is ever
+# missing the line; MIC_SOURCE=laptop is still there as an explicit escape
+# hatch if the robot-mic bridge is ever down and you need to fall back.
+MIC_SOURCE = os.environ.get("MIC_SOURCE", "robot").strip().lower()
 ROBOT_MIC_URL = os.environ.get("ROBOT_MIC_URL", "http://localhost:8775").rstrip("/")
 
 
@@ -1220,11 +1224,17 @@ class FastAgent:
         async with websockets.connect(url, max_size=16 * 1024 * 1024) as ws:
             CHUNK = 3200  # 0.1s of 16-bit mono @ 16kHz
             silence_chunk = base64.b64encode(bytes(CHUNK)).decode()
+            # We already have the WHOLE utterance in hand (our own VAD caught
+            # the silence that ended it) — no reason to re-play it out at
+            # real-time speed before the server can even start thinking. That
+            # used to add a full extra N seconds of dead air for an N-second
+            # sentence. Send the audio itself as fast as the socket allows;
+            # only the *trailing* silence needs real wall-clock pacing, since
+            # that's what the server's end-of-turn detector actually measures.
             for i in range(0, len(pcm), CHUNK):
                 await ws.send(json.dumps({
                     "user_audio_chunk": base64.b64encode(pcm[i:i + CHUNK]).decode()
                 }))
-                await asyncio.sleep(0.1)
             for _ in range(15):  # ~1.5s trailing silence to force turn-end
                 await ws.send(json.dumps({"user_audio_chunk": silence_chunk}))
                 await asyncio.sleep(0.1)
