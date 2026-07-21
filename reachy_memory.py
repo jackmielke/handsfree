@@ -44,6 +44,12 @@ Config (from .env / environment):
     MAX_SAMPLES      default 8     (oldest sample is dropped past this cap)
     POLL_INTERVAL    default 1.2   (seconds between full-frame face scans)
     MAX_FACES        default 4     (largest N faces considered per frame)
+    MIN_FACE_PX      default 70    (enrollment quality gate: reject faces
+                                    shorter than this — too small to embed well)
+    MIN_BLUR_VAR     default 45    (enrollment quality gate: reject faces
+                                    blurrier than this Laplacian variance)
+    SAMPLES_CACHE_TTL default 20   (seconds the in-memory face gallery is
+                                    reused before refetching from Supabase)
 
 Name someone Wonder has met:
     python3 reachy_memory.py --name <face_id> "Jack"
@@ -79,6 +85,20 @@ LEARN_TOLERANCE = float(os.environ.get("LEARN_TOLERANCE", "0.45"))
 MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "8"))
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "1.2"))
 MAX_FACES = int(os.environ.get("MAX_FACES", "4"))
+# Enrollment quality gate — a new identity (and every auto-banked sample) must
+# clear these, so a blurry, dark, or tiny detection never becomes a permanent
+# "person" that then widens the false-match net for everyone else. These gate
+# ENROLLMENT only; recognition of already-known people is unaffected, so a
+# known face far across the room still gets greeted — it just won't spawn a
+# new identity or bank a junk sample.
+# Sizes are tuned to THIS rig: measured live, a real person at normal desk
+# interaction distance renders ~36px tall and still embeds/matches confidently
+# (d~0.39), so the floor sits just under that — enough to reject sub-30px
+# background specks and faces-on-a-TV-across-the-room without blocking organic
+# enrollment of someone actually talking to the robot. Blur is the primary
+# junk filter (a sharp interaction-distance face measures ~140+ variance).
+MIN_FACE_PX = int(os.environ.get("MIN_FACE_PX", "32"))
+MIN_BLUR_VAR = float(os.environ.get("MIN_BLUR_VAR", "45"))
 
 GREET_COOLDOWN = 300.0    # don't re-greet a named person within this window
 LEARN_COOLDOWN = 45.0     # min time between auto-banked samples per person
@@ -151,6 +171,55 @@ def sb_get_samples() -> list[dict]:
             "times_seen": person.get("times_seen", 1),
         })
     return out
+
+
+# The full "face model" is small enough to hold in memory. Refetching every
+# ~250-vector gallery on every 1.2s poll was pure waste and grew with each new
+# person; instead keep it cached and refresh at most every SAMPLES_CACHE_TTL,
+# updating it in place when we bank/insert so within-session recognition is
+# immediate. Mutations from the API thread (name/merge/delete) invalidate it.
+SAMPLES_CACHE_TTL = float(os.environ.get("SAMPLES_CACHE_TTL", "20"))
+_SAMPLES_CACHE = {"rows": None, "at": 0.0}
+_samples_lock = threading.Lock()
+
+
+def get_samples_cached(force: bool = False) -> list[dict]:
+    now = time.time()
+    with _samples_lock:
+        rows = _SAMPLES_CACHE["rows"]
+        fresh = rows is not None and (now - _SAMPLES_CACHE["at"] < SAMPLES_CACHE_TTL)
+    if fresh and not force:
+        return rows
+    try:
+        new_rows = sb_get_samples()  # network — outside the lock
+    except Exception as e:
+        if rows is not None:
+            print(f"[memory] samples refetch failed ({e}); using cached", flush=True)
+            return rows
+        raise
+    with _samples_lock:
+        _SAMPLES_CACHE["rows"] = new_rows
+        _SAMPLES_CACHE["at"] = time.time()
+    return new_rows
+
+
+def _cache_add_sample(face_id: str, embedding: list[float],
+                      name: str | None = None, times_seen: int = 1) -> None:
+    """Append a just-banked sample to the live cache so the next frame matches
+    it without waiting for the TTL refetch."""
+    with _samples_lock:
+        if _SAMPLES_CACHE["rows"] is None:
+            return
+        _SAMPLES_CACHE["rows"].append({
+            "sample_id": None, "face_id": face_id, "embedding": embedding,
+            "created_at": None, "name": name, "times_seen": times_seen})
+
+
+def _invalidate_samples_cache() -> None:
+    """Force the next get_samples_cached() to refetch — call after any mutation
+    that reshapes identities (name/merge/delete/prune)."""
+    with _samples_lock:
+        _SAMPLES_CACHE["at"] = 0.0
 
 
 def sb_insert_face(snapshot: str) -> dict:
@@ -304,6 +373,19 @@ def encode_faces(jpeg: bytes) -> list[dict]:
     pil_img = Image.fromarray(img)
     for (top, right, bottom, left), enc in zip(boxes, encodings):
         cx, cy = (left + right) / 2, (top + bottom) / 2
+        # quality signals for the enrollment gate — measured on the TIGHT face
+        # region (not the padded crop) so background sharpness can't fake it:
+        #   face_px  = face height in pixels (proxy for distance/resolution)
+        #   blur     = variance of the Laplacian (low = out of focus/motion)
+        face_px = int(bottom - top)
+        region = img[max(0, top):bottom, max(0, left):right]
+        blur = 0.0
+        if region.shape[0] >= 3 and region.shape[1] >= 3:
+            gray = region.astype(np.float64).mean(axis=2)
+            lap = (-4 * gray[1:-1, 1:-1]
+                   + gray[:-2, 1:-1] + gray[2:, 1:-1]
+                   + gray[1:-1, :-2] + gray[1:-1, 2:])
+            blur = float(lap.var())
         # pad the crop a bit so the stored photo isn't a tight, awkward box
         pad_x, pad_y = (right - left) * 0.4, (bottom - top) * 0.4
         crop = pil_img.crop((
@@ -318,8 +400,20 @@ def encode_faces(jpeg: bytes) -> list[dict]:
             "snapshot": uri,
             "x": (cx / w - 0.5) * 2,
             "y": (cy / h - 0.5) * 2,
+            "face_px": face_px,
+            "blur": blur,
         })
     return out
+
+
+def _passes_quality(face: dict) -> tuple[bool, str]:
+    """Enrollment gate: is this detection clean enough to become a stored
+    sample? Returns (ok, reason-if-not)."""
+    if face.get("face_px", 0) < MIN_FACE_PX:
+        return False, f"too small ({face.get('face_px', 0)}px < {MIN_FACE_PX})"
+    if face.get("blur", 0.0) < MIN_BLUR_VAR:
+        return False, f"too blurry (var {face.get('blur', 0.0):.0f} < {MIN_BLUR_VAR})"
+    return True, ""
 
 
 def best_match(embedding: list[float], samples: list[dict]):
@@ -463,8 +557,10 @@ def _maybe_auto_merge() -> None:
     if time.time() - _auto_merge["last"] < AUTO_MERGE_EVERY_S:
         return
     _auto_merge["last"] = time.time()
-    _auto_merge_pass()
-    _auto_prune_pass()
+    merged = _auto_merge_pass()
+    pruned = _auto_prune_pass()
+    if merged or pruned:
+        _invalidate_samples_cache()  # identities changed under us
 
 
 # --------------------------------------------------------------------------- #
@@ -740,6 +836,7 @@ class _MemHandler(BaseHTTPRequestHandler):
                             p["name"] = name
                             live = time.time() - p["ts"] < PERSON_FRESH_S
                 print(f"[memory] named {face_id} -> {name}", flush=True)
+                _invalidate_samples_cache()  # name/merge reshaped identities
                 # Only greet out loud if this is someone actually standing in
                 # front of the camera right now — renaming an old gallery
                 # entry from across the room shouldn't make Wonder talk.
@@ -794,6 +891,7 @@ class _MemHandler(BaseHTTPRequestHandler):
                     method="DELETE",
                     headers=_sb_headers({"Prefer": "return=minimal"}))
                 urllib.request.urlopen(dreq, timeout=10).read()
+                _invalidate_samples_cache()
                 print(f"[memory] deleted sample {sample_id} of {face_id}", flush=True)
                 self._json({"ok": True, "remaining": total - 1})
             except Exception as e:
@@ -806,6 +904,7 @@ class _MemHandler(BaseHTTPRequestHandler):
                 if not face_id:
                     raise ValueError("face_id required")
                 sb_delete_face(face_id)
+                _invalidate_samples_cache()
                 with _current_lock:
                     CURRENT_PEOPLE[:] = [p for p in CURRENT_PEOPLE
                                          if p["face_id"] != face_id]
@@ -854,7 +953,7 @@ def run():
             continue
 
         try:
-            samples = sb_get_samples()
+            samples = get_samples_cached()
         except Exception as e:
             print(f"[memory] supabase read failed: {e}", flush=True)
             time.sleep(2)
@@ -874,11 +973,15 @@ def run():
                 seen_now.append({"face_id": fid, "name": name, "x": x, "y": y, "ts": now})
 
                 # A confident match auto-banks this sighting as a new sample —
-                # the model gets more accurate just from normal use.
-                if dist <= LEARN_TOLERANCE and now - last_learn.get(fid, 0) > LEARN_COOLDOWN:
+                # the model gets more accurate just from normal use — but only
+                # if the frame is clean enough (same gate as new enrollment),
+                # so we never bank a blurry/tiny shot that dilutes the person.
+                if (dist <= LEARN_TOLERANCE and _passes_quality(f)[0]
+                        and now - last_learn.get(fid, 0) > LEARN_COOLDOWN):
                     last_learn[fid] = now
                     try:
                         sb_add_sample(fid, embedding, snap)
+                        _cache_add_sample(fid, embedding, name, row.get("times_seen", 1))
                         print(f"[memory] learned a new sample for "
                               f"{name or fid} (d={dist:.2f})", flush=True)
                     except Exception as e:
@@ -898,10 +1001,23 @@ def run():
                         print(f"[memory] unnamed {fid} (d={dist:.2f}) — asking once", flush=True)
                         to_greet.append((fid, None))
             else:
+                # Quality gate: never turn a blurry / tiny / bad detection into
+                # a permanent identity. A poor frame of a stranger is just
+                # ignored this cycle; they'll enroll on a cleaner look.
+                ok, why = _passes_quality(f)
+                if not ok:
+                    print(f"[memory] skip enroll — {why}", flush=True)
+                    continue
                 try:
                     row = sb_insert_face(snap)
                     fid = row.get("id", "?")
                     sb_add_sample(fid, embedding, snap)
+                    # add to the cache AND this frame's working set, so a second
+                    # face in the same frame matches rather than re-enrolling.
+                    _cache_add_sample(fid, embedding, None, 1)
+                    samples.append({"sample_id": None, "face_id": fid,
+                                    "embedding": embedding, "created_at": None,
+                                    "name": None, "times_seen": 1})
                     last_greet[fid] = now
                     asked_name.add(fid)
                     seen_now.append({"face_id": fid, "name": None, "x": x, "y": y, "ts": now})
