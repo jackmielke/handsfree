@@ -100,7 +100,7 @@ MAX_FACES = int(os.environ.get("MAX_FACES", "4"))
 MIN_FACE_PX = int(os.environ.get("MIN_FACE_PX", "32"))
 MIN_BLUR_VAR = float(os.environ.get("MIN_BLUR_VAR", "45"))
 
-GREET_COOLDOWN = 300.0    # don't re-greet a named person within this window
+GREET_COOLDOWN = 600.0    # don't re-greet a named person within this window (10 min)
 LEARN_COOLDOWN = 45.0     # min time between auto-banked samples per person
 PERSON_FRESH_S = 6.0      # how long a detection stays "currently visible"
 MEM_PORT = int(os.environ.get("MEM_PORT", "8773"))
