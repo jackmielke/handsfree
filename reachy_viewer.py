@@ -325,11 +325,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
               background:#3b1219;border:1px solid #7f1d2d;color:#fca5a5;font-size:14px;
               line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
   .person-del:hover{background:#5a1a25}
-  .pname-input{width:104px;margin-top:6px;font-size:13px;font-weight:600;color:var(--txt);
-               background:transparent;border:1px solid transparent;border-radius:6px;
-               text-align:center;padding:2px 4px;font-family:inherit}
-  .pname-input::placeholder{color:var(--dim);font-weight:400;font-style:italic}
-  .pname-input:hover,.pname-input:focus{border-color:var(--line);background:#0a0b10;outline:none}
+  .pname-wrap{margin-top:6px}
+  .pname-wrap .combo-input{width:104px;height:auto;font-size:13px;font-weight:600;
+               color:var(--txt);background:transparent;border:1px solid transparent;
+               border-radius:6px;text-align:center;padding:3px 4px;font-family:inherit}
+  .pname-wrap .combo-input::placeholder{color:var(--dim);font-weight:400;font-style:italic}
+  .pname-wrap .combo-input:hover,.pname-wrap .combo-input:focus{border-color:var(--line);
+               background:#0a0b10}
+  .pname-wrap .combo-menu{min-width:150px}
   .person .pmeta{font-size:11px;color:var(--dim);margin-top:1px}
   .pstack{display:flex;justify-content:center;align-items:center;margin-top:5px}
   .pstack img{width:28px;height:28px;border-radius:7px;object-fit:cover;
@@ -355,26 +358,22 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
   .prow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .prow-known{background:#14324a;color:var(--accent);border-radius:20px;
               padding:4px 12px;font-size:13px;font-weight:600}
-  /* --- custom name-picker dropdown --- */
-  .dd{position:relative;display:inline-block}
-  .dd-btn{background:#0a0b10;border:1px solid var(--line);border-radius:10px;height:34px;
-          padding:0 12px;color:var(--txt);font:inherit;font-size:13px;cursor:pointer;
-          display:inline-flex;align-items:center;gap:8px;transition:border-color .15s}
-  .dd-btn:hover{border-color:var(--accent)}
-  .dd-caret{color:var(--dim);font-size:10px}
-  .dd-menu{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:30;
-           min-width:190px;max-height:230px;overflow-y:auto;background:var(--panel);
-           border:1px solid var(--line);border-radius:12px;padding:5px;
-           box-shadow:0 12px 32px rgba(0,0,0,.55)}
-  .dd-menu.open{display:block}
-  .dd-item{padding:8px 12px;border-radius:8px;font-size:13px;cursor:pointer;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .dd-item:hover{background:#1b1f2e}
-  .dd-new{color:var(--accent)}
-  .dd-sep{height:1px;background:var(--line);margin:5px 8px}
-  .dd-inputwrap{padding:4px}
-  .dd-input{width:100%;background:#0a0b10;border:1px solid var(--accent);border-radius:8px;
-            color:var(--txt);font:inherit;font-size:13px;padding:7px 10px;outline:none}
+  /* --- unified name combobox: one input, a floating suggestion list that
+     always tracks the input directly below it, never drifts off elsewhere --- */
+  .combo{position:relative;display:inline-block}
+  .combo-input{background:#0a0b10;border:1px solid var(--line);border-radius:10px;
+               height:34px;padding:0 12px;color:var(--txt);font:inherit;font-size:13px;
+               outline:none;transition:border-color .15s;width:100%}
+  .combo-input:focus{border-color:var(--accent)}
+  .combo-menu{display:none;position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:30;
+              max-height:200px;overflow-y:auto;background:var(--panel);
+              border:1px solid var(--line);border-radius:12px;padding:5px;
+              box-shadow:0 12px 32px rgba(0,0,0,.55)}
+  .combo-menu.open{display:block}
+  .combo-item{padding:8px 12px;border-radius:8px;font-size:13px;cursor:pointer;
+              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .combo-item:hover,.combo-item.hi{background:#1b1f2e}
+  .combo-empty{padding:8px 12px;font-size:12px;color:var(--dim);font-style:italic}
   /* --- per-person photo manager modal --- */
   .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(3,4,8,.72);
                   z-index:50;align-items:center;justify-content:center;padding:20px}
@@ -516,7 +515,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
     <div id=gallery class=gallery>
       <div class=gallery-empty>Nobody learned yet — stand in front of Vibey and teach it a name above.</div>
     </div>
-    <datalist id=knownNamesList></datalist>
   </div>
 </div>
 <div id=photomodal class=modal-backdrop>
@@ -542,15 +540,11 @@ cam.onerror=()=>{$('noc').style.display='flex';cam.style.opacity=0;};
 cam.onload =()=>{$('noc').style.display='none';cam.style.opacity=1;};
 cam.src=CAM+'/stream';
 
-// Names Vibey already knows, for the "who is this" dropdown — refreshed
-// alongside the gallery so a newly-taught name shows up here too.
+// Names Vibey already knows, feeding every nameCombo's suggestion list —
+// refreshed alongside the gallery so a newly-taught name shows up everywhere.
 let knownNames=[];
 async function fetchKnownNames(){
-  try{
-    knownNames=await(await fetch('/knownnames')).json();
-    const dl=$('knownNamesList');
-    dl.innerHTML=knownNames.map(n=>`<option value="${n.replace(/"/g,'&quot;')}">`).join('');
-  }catch(_){}
+  try{ knownNames=await(await fetch('/knownnames')).json(); }catch(_){}
 }
 
 function drawFOV(people){
@@ -577,12 +571,12 @@ function drawFOV(people){
 }
 
 // Renders one row per currently-visible person: a pill for known names, or a
-// dropdown-of-known-names + free-text fallback + Teach button for unknowns.
+// name combobox (type or pick) for unknowns.
 let peopleRowIds=[];
 // One open dropdown at a time; closed on any outside click.
 document.addEventListener('click',e=>{
-  if(!e.target.closest('.dd'))
-    document.querySelectorAll('.dd-menu.open').forEach(m=>m.classList.remove('open'));
+  if(!e.target.closest('.combo'))
+    document.querySelectorAll('.combo-menu.open').forEach(m=>m.classList.remove('open'));
 });
 
 async function teachFace(faceId,name,after){
@@ -595,59 +589,74 @@ async function teachFace(faceId,name,after){
   if(after)after();
 }
 
-// Custom name-picker: a pill button opening a floating menu of known names
-// plus a "new name" row — replaces the clunky native <select>.
-function nameDropdown(faceId){
-  const dd=document.createElement('span');
-  dd.className='dd';
-  const btn=document.createElement('button');
-  btn.className='dd-btn';
-  btn.innerHTML='Who is this? <span class=dd-caret>▾</span>';
+// One combobox component used everywhere a face gets a name: a plain text
+// input (type a new name, or start typing to filter) with a floating
+// suggestion list anchored directly beneath *this* input — never detached,
+// never rendered by the browser somewhere else on the page (that was the
+// native <datalist> popup's problem). Same component for the "who is this?"
+// row on a live in-frame face and for renaming someone in the gallery below.
+function nameCombo(currentName,onSave,placeholder){
+  const wrap=document.createElement('span');
+  wrap.className='combo';
+  const inp=document.createElement('input');
+  inp.className='combo-input';
+  inp.value=currentName||'';
+  inp.placeholder=placeholder||'Who is this?';
+  inp.autocomplete='off';
   const menu=document.createElement('div');
-  menu.className='dd-menu';
-  for(const n of knownNames){
-    const it=document.createElement('div');
-    it.className='dd-item'; it.textContent=n;
-    it.onclick=()=>{menu.classList.remove('open');btn.textContent='Teaching…';teachFace(faceId,n);};
-    menu.appendChild(it);
-  }
-  if(knownNames.length){
-    const hr=document.createElement('div'); hr.className='dd-sep'; menu.appendChild(hr);
-  }
-  const newRow=document.createElement('div');
-  newRow.className='dd-item dd-new'; newRow.textContent='＋ New name…';
-  newRow.onclick=e=>{
-    e.stopPropagation();
-    newRow.replaceWith(makeNewNameInput());
-  };
-  const makeNewNameInput=()=>{
-    const wrap=document.createElement('div'); wrap.className='dd-inputwrap';
-    const inp=document.createElement('input');
-    inp.className='dd-input'; inp.placeholder='type a name, Enter to save';
-    inp.onclick=e=>e.stopPropagation();
-    inp.addEventListener('keydown',ev=>{
-      if(ev.key==='Enter'&&inp.value.trim()){
-        menu.classList.remove('open');
-        teachFace(faceId,inp.value);
+  menu.className='combo-menu';
+  let hi=-1;
+  const items=()=>Array.from(menu.querySelectorAll('.combo-item[data-name]'));
+
+  function renderMenu(){
+    const q=inp.value.trim().toLowerCase();
+    const matches=knownNames.filter(n=>n.toLowerCase().includes(q)&&n!==currentName);
+    menu.innerHTML='';
+    hi=-1;
+    if(!matches.length){
+      const empty=document.createElement('div');
+      empty.className='combo-empty';
+      empty.textContent=q?'no match — Enter to teach a new name':'start typing or pick a known name';
+      menu.appendChild(empty);
+    }else{
+      for(const n of matches){
+        const it=document.createElement('div');
+        it.className='combo-item'; it.textContent=n; it.dataset.name=n;
+        it.onmousedown=e=>{  // mousedown fires before blur — beats the blur-save
+          e.preventDefault();
+          inp.value=n; menu.classList.remove('open'); commit();
+        };
+        menu.appendChild(it);
       }
-    });
-    wrap.appendChild(inp);
-    setTimeout(()=>inp.focus(),0);
-    return wrap;
-  };
-  menu.appendChild(newRow);
-  btn.onclick=e=>{
-    e.stopPropagation();
-    document.querySelectorAll('.dd-menu.open').forEach(m=>{if(m!==menu)m.classList.remove('open');});
-    menu.classList.toggle('open');
-  };
-  dd.appendChild(btn); dd.appendChild(menu);
-  return dd;
+    }
+  }
+  function openMenu(){renderMenu();menu.classList.add('open');}
+  function commit(){
+    const v=inp.value.trim();
+    menu.classList.remove('open');
+    if(v&&v!==currentName){currentName=v;onSave(v);}
+  }
+  inp.addEventListener('focus',()=>{inp.select();openMenu();});
+  inp.addEventListener('input',renderMenu);
+  inp.addEventListener('blur',commit);
+  inp.addEventListener('keydown',e=>{
+    const list=items();
+    if(e.key==='Enter'){e.preventDefault();inp.blur();}
+    else if(e.key==='Escape'){inp.value=currentName||'';menu.classList.remove('open');inp.blur();}
+    else if(e.key==='ArrowDown'&&list.length){e.preventDefault();hi=Math.min(hi+1,list.length-1);
+      list.forEach((it,i)=>it.classList.toggle('hi',i===hi)); inp.value=list[hi].dataset.name;}
+    else if(e.key==='ArrowUp'&&list.length){e.preventDefault();hi=Math.max(hi-1,0);
+      list.forEach((it,i)=>it.classList.toggle('hi',i===hi)); inp.value=list[hi].dataset.name;}
+  });
+  wrap.appendChild(inp); wrap.appendChild(menu);
+  return {el:wrap,input:inp};
 }
 
 function renderPeopleRows(people){
   const ids=people.map(p=>p.face_id+'|'+(p.name||'')).join(',');
   if(ids===peopleRowIds.join(','))return;  // avoid nuking focus every 250ms
+  // Never rebuild out from under someone actively typing a name.
+  if(document.activeElement&&document.activeElement.closest('#peoplerows'))return;
   peopleRowIds=people.map(p=>p.face_id+'|'+(p.name||''));
   const box=$('peoplerows');
   box.innerHTML='';
@@ -660,7 +669,7 @@ function renderPeopleRows(people){
       pill.textContent=p.name;
       row.appendChild(pill);
     }else{
-      row.appendChild(nameDropdown(p.face_id));
+      row.appendChild(nameCombo(null,name=>teachFace(p.face_id,name),'Who is this?').el);
     }
     box.appendChild(row);
   }
@@ -845,6 +854,11 @@ async function fetchGallery(){
     if(!Array.isArray(people))return;
     $('peoplecount').textContent=people.length?('· '+people.length):'';
     if(people.length===galleryLen)return;  // cheap no-op guard
+    // Never rebuild the gallery out from under someone actively renaming a
+    // card — that was the "glitchy while typing" bug (a poll landing
+    // mid-edit used to wipe the input and the browser's own datalist
+    // popup along with it).
+    if(document.activeElement&&document.activeElement.closest('#gallery'))return;
     galleryLen=people.length;
     const g=$('gallery');
     if(!people.length){
@@ -880,25 +894,15 @@ async function fetchGallery(){
       };
       thumbWrap.appendChild(img); thumbWrap.appendChild(delBtn);
 
-      const nameInput=document.createElement('input');
-      nameInput.className='pname-input';
-      nameInput.value=p.name||'';
-      nameInput.placeholder='name…';
-      nameInput.setAttribute('list','knownNamesList');
-      const saveName=async()=>{
-        const v=nameInput.value.trim();
-        if(!v||v===p.name)return;
+      const nameWrap=document.createElement('div');
+      nameWrap.className='pname-wrap';
+      nameWrap.appendChild(nameCombo(p.name,async v=>{
         try{
           await fetch('/nameface',{method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify({name:v,face_id:p.id})});
         }catch(_){}
-        galleryLen=-1; fetchGallery();
-      };
-      nameInput.addEventListener('blur',saveName);
-      nameInput.addEventListener('keydown',e=>{if(e.key==='Enter')nameInput.blur();});
-      // Select-all on focus so a click-to-edit never silently inserts text
-      // mid-name instead of replacing it.
-      nameInput.addEventListener('focus',()=>nameInput.select());
+        galleryLen=-1; fetchGallery(); fetchKnownNames();
+      },'name…').el);
 
       const meta=document.createElement('div');
       meta.className='pmeta';
@@ -922,7 +926,7 @@ async function fetchGallery(){
         }
         el.appendChild(stack);
       }
-      el.appendChild(nameInput); el.appendChild(meta);
+      el.appendChild(nameWrap); el.appendChild(meta);
       g.appendChild(el);
     }
   }catch(_){}
