@@ -3232,7 +3232,7 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. THIS TILE IS THE ONLY WAY TO TURN IT ON (no voice/gesture activation — they kept firing accidentally). To exit: click again, say 'stillness off', or throw 🤘.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
-        <button class="cc-opt" data-exp="two_hand_cc" title="👌👌 Both hands doing OK = Cmd+C copy · ✌️✌️ Both hands doing peace = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">👌✌️ two-hand copy/paste</button>
+        <button class="cc-opt" data-exp="two_hand_cc" title="✊✊ Both hands doing a closed fist = Cmd+C copy · ✌️✌️ Both hands doing peace = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✊✌️ two-hand copy/paste</button>
         <button class="cc-opt" data-exp="vulcan_undo" title="👎👎 Both hands thumbs-down → Cmd+Z undo · 👍👍 Both hands thumbs-up → Cmd+Shift+Z redo. Two-hand gestures; near-impossible to fire accidentally.">👎👎 undo / 👍👍 redo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
@@ -10103,13 +10103,17 @@ def _detect_two_hand_peace(hands_lm_list, now: float) -> bool:
     return False
 
 
-def _detect_two_hand_ok(hands_lm_list, now: float) -> bool:
-    """Both hands showing 👌 simultaneously. Edge-triggered + cooldown."""
+def _detect_two_hand_fist(hands_lm_list, now: float) -> bool:
+    """Both hands showing ✊ (closed fist) simultaneously. Edge + cooldown.
+    Replaces the old 👌👌 OK-sign copy trigger — OK's thumb-index touch
+    fires constantly from ordinary face-touching/resting hand poses. A
+    fully clenched fist on BOTH hands at once is a pose you essentially
+    never form by accident."""
     global _two_ok_armed, _two_ok_last_at
     if not hands_lm_list or len(hands_lm_list) < 2:
         _two_ok_armed = True
         return False
-    both = sum(1 for h in hands_lm_list if _is_ok_sign(h)) >= 2
+    both = sum(1 for h in hands_lm_list if _is_fist(h)) >= 2
     if both and _two_ok_armed:
         if now - _two_ok_last_at > TWO_HAND_CC_COOLDOWN_S:
             _two_ok_last_at = now
@@ -10535,17 +10539,17 @@ def _capture_loop() -> None:
             except Exception as e:
                 print(f"[viewer] two-hand peace paste failed: {e}",
                       flush=True)
-        # 👌👌 Two-hand OK → Cmd+V paste.
+        # ✊✊ Two-hand fist → Cmd+C copy.
         if (_two_hand_cc_enabled and _system_enabled
-                and _detect_two_hand_ok(hands_for_cursor, now)):
-            print("[viewer] 👌👌 two-hand OK → cmd+c", flush=True)
-            _push_vision_event("👌👌 → copy")
+                and _detect_two_hand_fist(hands_for_cursor, now)):
+            print("[viewer] ✊✊ two-hand fist → cmd+c", flush=True)
+            _push_vision_event("✊✊ → copy")
             try:
                 _fire_hotkey("cmd+c")
-                _toast("Wonder", "👌👌 copied")
+                _toast("Wonder", "✊✊ copied")
                 _play_sound("Pop")
             except Exception as e:
-                print(f"[viewer] two-hand OK copy failed: {e}",
+                print(f"[viewer] two-hand fist copy failed: {e}",
                       flush=True)
         # 👎👎 Two-hand thumbs-down → Cmd+Z undo.
         if (_vulcan_undo_enabled and _system_enabled
