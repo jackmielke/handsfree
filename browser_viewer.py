@@ -3232,8 +3232,8 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. THIS TILE IS THE ONLY WAY TO TURN IT ON (no voice/gesture activation — they kept firing accidentally). To exit: click again, say 'stillness off', or throw 🤘.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
-        <button class="cc-opt" data-exp="two_hand_cc" title="✊✊ Both hands doing a closed fist = Cmd+C copy · ✌️✌️ Both hands doing peace = Cmd+V paste. Two-hand deliberate gestures; near-impossible to fire accidentally.">✊✌️ two-hand copy/paste</button>
-        <button class="cc-opt" data-exp="vulcan_undo" title="👎👎 Both hands thumbs-down → Cmd+Z undo · 👍👍 Both hands thumbs-up → Cmd+Shift+Z redo. Two-hand gestures; near-impossible to fire accidentally.">👎👎 undo / 👍👍 redo</button>
+        <button class="cc-opt" data-exp="two_hand_cc" title="Hold up the SAME number of fingers on BOTH hands: 1 finger = Cmd+C copy · 4 fingers = Cmd+V paste. Unified finger-count scheme; no shape collisions.">☝️4️⃣ two-hand copy/paste</button>
+        <button class="cc-opt" data-exp="vulcan_undo" title="Hold up the SAME number of fingers on BOTH hands: 2 fingers = Cmd+Shift+Z redo · 3 fingers = Cmd+Z undo. Unified finger-count scheme; no shape collisions.">✌️3️⃣ redo / undo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -9603,6 +9603,43 @@ def _finger_curled(hand, tip_idx: int, pip_idx: int) -> bool:
     return d(hand[tip_idx]) < d(hand[pip_idx]) * 1.05
 
 
+def _extended_finger_count(hand) -> int:
+    """Count of extended fingers among index/middle/ring/pinky (thumb
+    excluded — natural counting gestures rely on these four)."""
+    n = 0
+    if _finger_extended(hand, 8, 6):   n += 1  # index
+    if _finger_extended(hand, 12, 10): n += 1  # middle
+    if _finger_extended(hand, 16, 14): n += 1  # ring
+    if _finger_extended(hand, 20, 18): n += 1  # pinky
+    return n
+
+
+def _is_exact_finger_count(hand, n: int) -> bool:
+    """True if EXACTLY n of index/middle/ring/pinky are extended and the
+    rest are curled (not just >= n — avoids "3" matching while the 4th
+    finger is ambiguously mid-curl)."""
+    fingers = [
+        _finger_extended(hand, 8, 6),
+        _finger_extended(hand, 12, 10),
+        _finger_extended(hand, 16, 14),
+        _finger_extended(hand, 20, 18),
+    ]
+    curled = [
+        _finger_curled(hand, 8, 6),
+        _finger_curled(hand, 12, 10),
+        _finger_curled(hand, 16, 14),
+        _finger_curled(hand, 20, 18),
+    ]
+    ext_count = sum(fingers)
+    if ext_count != n:
+        return False
+    # Everything NOT extended must be clearly curled (reject "in between").
+    for is_ext, is_curl in zip(fingers, curled):
+        if not is_ext and not is_curl:
+            return False
+    return True
+
+
 def _is_peace_sign(hand) -> bool:
     """✌️: index + middle extended, ring + pinky curled."""
     idx_ext  = _finger_extended(hand, 8, 6)
@@ -10086,75 +10123,35 @@ def _detect_rock_off(hands_lm_list, now: float) -> bool:
                                   now, cooldown=ROCK_OFF_COOLDOWN_S)
 
 
-def _detect_two_hand_peace(hands_lm_list, now: float) -> bool:
-    """Both hands showing ✌️ simultaneously. Edge-triggered + cooldown."""
-    global _two_peace_armed, _two_peace_last_at
+# Unified two-hand finger-counting scheme — replaces the old mix of
+# icon-shaped gestures (OK / fist / thumbs-up / thumbs-down) which kept
+# false-triggering from ordinary hand poses (OK's thumb-index touch
+# fires when resting a hand on your face; thumbs-up/down are common
+# incidental hand shapes too). Counting 1/2/3/4 fingers on BOTH hands
+# simultaneously is a deliberate, unambiguous pose family with no
+# shape collisions between entries — each count is mutually exclusive
+# by construction (_is_exact_finger_count requires the OTHER fingers
+# to be clearly curled, not just "not extended").
+#   1 finger  both hands → copy
+#   2 fingers both hands → redo
+#   3 fingers both hands → undo
+#   4 fingers both hands → paste
+def _detect_two_hand_count(hands_lm_list, n: int, armed_flag: str,
+                            last_at_flag: str, now: float,
+                            cooldown: float) -> bool:
+    g = globals()
     if not hands_lm_list or len(hands_lm_list) < 2:
-        _two_peace_armed = True
+        g[armed_flag] = True
         return False
-    both = sum(1 for h in hands_lm_list if _is_peace_sign(h)) >= 2
-    if both and _two_peace_armed:
-        if now - _two_peace_last_at > TWO_HAND_CC_COOLDOWN_S:
-            _two_peace_last_at = now
-            _two_peace_armed = False
+    both = sum(1 for h in hands_lm_list
+               if _is_exact_finger_count(h, n)) >= 2
+    if both and g[armed_flag]:
+        if now - g[last_at_flag] > cooldown:
+            g[last_at_flag] = now
+            g[armed_flag] = False
             return True
     elif not both:
-        _two_peace_armed = True
-    return False
-
-
-def _detect_two_hand_fist(hands_lm_list, now: float) -> bool:
-    """Both hands showing ✊ (closed fist) simultaneously. Edge + cooldown.
-    Replaces the old 👌👌 OK-sign copy trigger — OK's thumb-index touch
-    fires constantly from ordinary face-touching/resting hand poses. A
-    fully clenched fist on BOTH hands at once is a pose you essentially
-    never form by accident."""
-    global _two_ok_armed, _two_ok_last_at
-    if not hands_lm_list or len(hands_lm_list) < 2:
-        _two_ok_armed = True
-        return False
-    both = sum(1 for h in hands_lm_list if _is_fist(h)) >= 2
-    if both and _two_ok_armed:
-        if now - _two_ok_last_at > TWO_HAND_CC_COOLDOWN_S:
-            _two_ok_last_at = now
-            _two_ok_armed = False
-            return True
-    elif not both:
-        _two_ok_armed = True
-    return False
-
-
-def _detect_two_hand_thumbs_down(hands_lm_list, now: float) -> bool:
-    """👎👎 Both hands doing thumbs-down → undo. Edge + cooldown."""
-    global _two_vulcan_armed, _two_vulcan_last_at
-    if not hands_lm_list or len(hands_lm_list) < 2:
-        _two_vulcan_armed = True
-        return False
-    both = sum(1 for h in hands_lm_list if _is_thumbs_down(h)) >= 2
-    if both and _two_vulcan_armed:
-        if now - _two_vulcan_last_at > VULCAN_COOLDOWN_S:
-            _two_vulcan_last_at = now
-            _two_vulcan_armed = False
-            return True
-    elif not both:
-        _two_vulcan_armed = True
-    return False
-
-
-def _detect_two_hand_thumbs(hands_lm_list, now: float) -> bool:
-    """👍👍 Both hands doing thumbs-up → redo. Edge + cooldown."""
-    global _two_thumbs_armed, _two_thumbs_last_at
-    if not hands_lm_list or len(hands_lm_list) < 2:
-        _two_thumbs_armed = True
-        return False
-    both = sum(1 for h in hands_lm_list if _is_thumbs_up(h)) >= 2
-    if both and _two_thumbs_armed:
-        if now - _two_thumbs_last_at > VULCAN_COOLDOWN_S:
-            _two_thumbs_last_at = now
-            _two_thumbs_armed = False
-            return True
-    elif not both:
-        _two_thumbs_armed = True
+        g[armed_flag] = True
     return False
 
 
@@ -10527,52 +10524,63 @@ def _capture_loop() -> None:
             print("[viewer] 🤟 ILY → toggle mouth click "
                   f"(was disabled={_mouth_click_disabled})", flush=True)
             _set_mouth_click_disabled(not _mouth_click_disabled)
-        # ✌️✌️ Two-hand peace → Cmd+C copy.
+        # ☝️ 1 finger, both hands → Cmd+C copy.
         if (_two_hand_cc_enabled and _system_enabled
-                and _detect_two_hand_peace(hands_for_cursor, now)):
-            print("[viewer] ✌️✌️ two-hand peace → cmd+v", flush=True)
-            _push_vision_event("✌️✌️ → paste")
-            try:
-                _fire_hotkey("cmd+v")
-                _toast("Wonder", "✌️✌️ pasted")
-                _play_sound("Bottle")
-            except Exception as e:
-                print(f"[viewer] two-hand peace paste failed: {e}",
-                      flush=True)
-        # ✊✊ Two-hand fist → Cmd+C copy.
-        if (_two_hand_cc_enabled and _system_enabled
-                and _detect_two_hand_fist(hands_for_cursor, now)):
-            print("[viewer] ✊✊ two-hand fist → cmd+c", flush=True)
-            _push_vision_event("✊✊ → copy")
+                and _detect_two_hand_count(hands_for_cursor, 1,
+                                            '_two_ok_armed',
+                                            '_two_ok_last_at', now,
+                                            TWO_HAND_CC_COOLDOWN_S)):
+            print("[viewer] ☝️☝️ two-hand 1-finger → cmd+c", flush=True)
+            _push_vision_event("☝️☝️ → copy")
             try:
                 _fire_hotkey("cmd+c")
-                _toast("Wonder", "✊✊ copied")
+                _toast("Wonder", "☝️☝️ copied")
                 _play_sound("Pop")
             except Exception as e:
-                print(f"[viewer] two-hand fist copy failed: {e}",
-                      flush=True)
-        # 👎👎 Two-hand thumbs-down → Cmd+Z undo.
+                print(f"[viewer] 1-finger copy failed: {e}", flush=True)
+        # ✌️ 2 fingers, both hands → Cmd+Shift+Z redo.
         if (_vulcan_undo_enabled and _system_enabled
-                and _detect_two_hand_thumbs_down(hands_for_cursor, now)):
-            print("[viewer] 👎👎 two-hand thumbs-down → cmd+z", flush=True)
-            _push_vision_event("👎👎 → undo")
-            try:
-                _fire_hotkey("cmd+z")
-                _toast("Wonder", "👎👎 undone")
-                _play_sound("Blow")
-            except Exception as e:
-                print(f"[viewer] undo failed: {e}", flush=True)
-        # 👍👍 Two-hand thumbs-up → Cmd+Shift+Z redo.
-        if (_vulcan_undo_enabled and _system_enabled
-                and _detect_two_hand_thumbs(hands_for_cursor, now)):
-            print("[viewer] 👍👍 two-hand thumbs → cmd+shift+z", flush=True)
-            _push_vision_event("👍👍 → redo")
+                and _detect_two_hand_count(hands_for_cursor, 2,
+                                            '_two_thumbs_armed',
+                                            '_two_thumbs_last_at', now,
+                                            VULCAN_COOLDOWN_S)):
+            print("[viewer] ✌️✌️ two-hand 2-finger → cmd+shift+z",
+                  flush=True)
+            _push_vision_event("✌️✌️ → redo")
             try:
                 _fire_hotkey("cmd+shift+z")
-                _toast("Wonder", "👍👍 redone")
+                _toast("Wonder", "✌️✌️ redone")
                 _play_sound("Ping")
             except Exception as e:
-                print(f"[viewer] thumbs redo failed: {e}", flush=True)
+                print(f"[viewer] 2-finger redo failed: {e}", flush=True)
+        # 🤟(ish) 3 fingers, both hands → Cmd+Z undo.
+        if (_vulcan_undo_enabled and _system_enabled
+                and _detect_two_hand_count(hands_for_cursor, 3,
+                                            '_two_vulcan_armed',
+                                            '_two_vulcan_last_at', now,
+                                            VULCAN_COOLDOWN_S)):
+            print("[viewer] 3️⃣ two-hand 3-finger → cmd+z", flush=True)
+            _push_vision_event("3️⃣3️⃣ → undo")
+            try:
+                _fire_hotkey("cmd+z")
+                _toast("Wonder", "3️⃣3️⃣ undone")
+                _play_sound("Blow")
+            except Exception as e:
+                print(f"[viewer] 3-finger undo failed: {e}", flush=True)
+        # 🖐(-thumb) 4 fingers, both hands → Cmd+V paste.
+        if (_two_hand_cc_enabled and _system_enabled
+                and _detect_two_hand_count(hands_for_cursor, 4,
+                                            '_two_peace_armed',
+                                            '_two_peace_last_at', now,
+                                            TWO_HAND_CC_COOLDOWN_S)):
+            print("[viewer] 4️⃣ two-hand 4-finger → cmd+v", flush=True)
+            _push_vision_event("4️⃣4️⃣ → paste")
+            try:
+                _fire_hotkey("cmd+v")
+                _toast("Wonder", "4️⃣4️⃣ pasted")
+                _play_sound("Bottle")
+            except Exception as e:
+                print(f"[viewer] 4-finger paste failed: {e}", flush=True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
