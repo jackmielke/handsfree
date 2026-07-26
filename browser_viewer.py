@@ -3232,8 +3232,8 @@ HTML = """<!doctype html>
         <button class="cc-opt" data-exp="stillness" title="🦉 Stillness mode (experimental): head pose moves the cursor; hold the cursor still over a spot for ~0.8s to click. Fully hands-free. THIS TILE IS THE ONLY WAY TO TURN IT ON (no voice/gesture activation — they kept firing accidentally). To exit: click again, say 'stillness off', or throw 🤘.">🦉 stillness mode</button>
         <button class="cc-opt" data-exp="mouth_click_disabled" title="👄 When ON, the mouth-click hybrid stops firing (your click method stays set to mouth, just temporarily disabled). Toggle by saying 'mouth off' / 'mouth on' or throwing 🤟 ILY sign.">👄 mouth click disabled</button>
         <button class="cc-opt" data-exp="cheek_copy" title="🐿 Puff LEFT cheek → Cmd+C copy · Puff RIGHT cheek → Cmd+V paste. Uses landmark asymmetry (cheekPuff blendshape is bilateral in MediaPipe) with baseline calibration so natural face asymmetry doesn't misfire.">🐿 sided cheek copy/paste</button>
-        <button class="cc-opt" data-exp="two_hand_cc" title="Hold up the SAME number of fingers on BOTH hands: 1 finger = Cmd+C copy · 4 fingers = Cmd+V paste. Unified finger-count scheme; no shape collisions.">☝️4️⃣ two-hand copy/paste</button>
-        <button class="cc-opt" data-exp="vulcan_undo" title="Hold up the SAME number of fingers on BOTH hands: 2 fingers = Cmd+Shift+Z redo · 3 fingers = Cmd+Z undo. Unified finger-count scheme; no shape collisions.">✌️3️⃣ redo / undo</button>
+        <button class="cc-opt" data-exp="two_hand_cc" title="Hold up the SAME number of fingers on BOTH hands: 1 finger = Cmd+C copy · 2 fingers = Cmd+V paste.">☝️✌️ two-hand copy/paste</button>
+        <button class="cc-opt" data-exp="vulcan_undo" title="3 fingers on BOTH hands = Cmd+Shift+Z redo · 👎👎 Both hands thumbs-down = Cmd+Z undo.">3️⃣ redo / 👎👎 undo</button>
         <button class="cc-opt" data-exp="tongue_paste" title="👅 Stick your tongue out briefly → Cmd+V paste. Uses the tongueOut blendshape; extremely rare in ambient face expressions.">👅 tongue paste</button>
         <button class="cc-opt" data-exp="wink_copy_paste" title="😉 Left wink = copy (Cmd+C), right wink = paste (Cmd+V). Auto-skipped if wink is your click method. Default ON.">😉 wink copy/paste</button>
         <button class="cc-opt" data-exp="t_timeout" title="Make a T with both hands to toggle everything off / on">T ✋ timeout</button>
@@ -10155,6 +10155,26 @@ def _detect_two_hand_count(hands_lm_list, n: int, armed_flag: str,
     return False
 
 
+def _detect_two_hand_thumbs_down(hands_lm_list, now: float) -> bool:
+    """👎👎 Both hands doing thumbs-down → undo. Edge + cooldown.
+    Kept as the original icon gesture per user request (not folded
+    into the 1/2/3 finger-count scheme — reuses the now-unused
+    _two_peace_armed/_two_peace_last_at state pair)."""
+    global _two_peace_armed, _two_peace_last_at
+    if not hands_lm_list or len(hands_lm_list) < 2:
+        _two_peace_armed = True
+        return False
+    both = sum(1 for h in hands_lm_list if _is_thumbs_down(h)) >= 2
+    if both and _two_peace_armed:
+        if now - _two_peace_last_at > VULCAN_COOLDOWN_S:
+            _two_peace_last_at = now
+            _two_peace_armed = False
+            return True
+    elif not both:
+        _two_peace_armed = True
+    return False
+
+
 def _detect_ily_toggle(hands_lm_list, now: float) -> bool:
     if not hands_lm_list:
         globals()['_ily_armed'] = True
@@ -10538,49 +10558,47 @@ def _capture_loop() -> None:
                 _play_sound("Pop")
             except Exception as e:
                 print(f"[viewer] 1-finger copy failed: {e}", flush=True)
-        # ✌️ 2 fingers, both hands → Cmd+Shift+Z redo.
-        if (_vulcan_undo_enabled and _system_enabled
+        # ✌️ 2 fingers, both hands → Cmd+V paste.
+        if (_two_hand_cc_enabled and _system_enabled
                 and _detect_two_hand_count(hands_for_cursor, 2,
                                             '_two_thumbs_armed',
                                             '_two_thumbs_last_at', now,
-                                            VULCAN_COOLDOWN_S)):
-            print("[viewer] ✌️✌️ two-hand 2-finger → cmd+shift+z",
+                                            TWO_HAND_CC_COOLDOWN_S)):
+            print("[viewer] ✌️✌️ two-hand 2-finger → cmd+v",
                   flush=True)
-            _push_vision_event("✌️✌️ → redo")
+            _push_vision_event("✌️✌️ → paste")
             try:
-                _fire_hotkey("cmd+shift+z")
-                _toast("Wonder", "✌️✌️ redone")
-                _play_sound("Ping")
+                _fire_hotkey("cmd+v")
+                _toast("Wonder", "✌️✌️ pasted")
+                _play_sound("Bottle")
             except Exception as e:
-                print(f"[viewer] 2-finger redo failed: {e}", flush=True)
-        # 🤟(ish) 3 fingers, both hands → Cmd+Z undo.
+                print(f"[viewer] 2-finger paste failed: {e}", flush=True)
+        # 3️⃣ 3 fingers, both hands → Cmd+Shift+Z redo.
         if (_vulcan_undo_enabled and _system_enabled
                 and _detect_two_hand_count(hands_for_cursor, 3,
                                             '_two_vulcan_armed',
                                             '_two_vulcan_last_at', now,
                                             VULCAN_COOLDOWN_S)):
-            print("[viewer] 3️⃣ two-hand 3-finger → cmd+z", flush=True)
-            _push_vision_event("3️⃣3️⃣ → undo")
+            print("[viewer] 3️⃣ two-hand 3-finger → cmd+shift+z", flush=True)
+            _push_vision_event("3️⃣3️⃣ → redo")
+            try:
+                _fire_hotkey("cmd+shift+z")
+                _toast("Wonder", "3️⃣3️⃣ redone")
+                _play_sound("Ping")
+            except Exception as e:
+                print(f"[viewer] 3-finger redo failed: {e}", flush=True)
+        # 👎👎 Both hands thumbs-down → Cmd+Z undo (back to the original
+        # icon gesture per user request — no 4th finger-count entry).
+        if (_vulcan_undo_enabled and _system_enabled
+                and _detect_two_hand_thumbs_down(hands_for_cursor, now)):
+            print("[viewer] 👎👎 two-hand thumbs-down → cmd+z", flush=True)
+            _push_vision_event("👎👎 → undo")
             try:
                 _fire_hotkey("cmd+z")
-                _toast("Wonder", "3️⃣3️⃣ undone")
+                _toast("Wonder", "👎👎 undone")
                 _play_sound("Blow")
             except Exception as e:
-                print(f"[viewer] 3-finger undo failed: {e}", flush=True)
-        # 🖐(-thumb) 4 fingers, both hands → Cmd+V paste.
-        if (_two_hand_cc_enabled and _system_enabled
-                and _detect_two_hand_count(hands_for_cursor, 4,
-                                            '_two_peace_armed',
-                                            '_two_peace_last_at', now,
-                                            TWO_HAND_CC_COOLDOWN_S)):
-            print("[viewer] 4️⃣ two-hand 4-finger → cmd+v", flush=True)
-            _push_vision_event("4️⃣4️⃣ → paste")
-            try:
-                _fire_hotkey("cmd+v")
-                _toast("Wonder", "4️⃣4️⃣ pasted")
-                _play_sound("Bottle")
-            except Exception as e:
-                print(f"[viewer] 4-finger paste failed: {e}", flush=True)
+                print(f"[viewer] thumbs-down undo failed: {e}", flush=True)
         if _hands_disabled:
             hands_lm_list = []
             hand_wrists = []
